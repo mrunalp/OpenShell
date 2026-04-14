@@ -1506,6 +1506,8 @@ pub async fn gateway_admin_deploy(
     registry_username: Option<&str>,
     registry_token: Option<&str>,
     gpu: Vec<String>,
+    oidc_issuer: Option<&str>,
+    oidc_audience: &str,
 ) -> Result<()> {
     let location = if remote.is_some() { "remote" } else { "local" };
 
@@ -1571,6 +1573,10 @@ pub async fn gateway_admin_deploy(
     }
     if let Some(token) = registry_token {
         options = options.with_registry_token(token);
+    }
+    if let Some(issuer) = oidc_issuer {
+        options = options.with_oidc_issuer(issuer);
+        options = options.with_oidc_audience(oidc_audience);
     }
 
     let handle = deploy_gateway_with_panel(options, name, location).await?;

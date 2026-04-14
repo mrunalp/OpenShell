@@ -828,6 +828,15 @@ enum GatewayCommands {
         /// (`--gpus all`) otherwise.
         #[arg(long)]
         gpu: bool,
+
+        /// OIDC issuer URL for JWT-based authentication.
+        /// When set, the K3s server will validate Bearer tokens against this issuer.
+        #[arg(long)]
+        oidc_issuer: Option<String>,
+
+        /// OIDC audience (client ID) for JWT validation.
+        #[arg(long, default_value = "openshell-cli", requires = "oidc_issuer")]
+        oidc_audience: String,
     },
 
     /// Stop the gateway (preserves state).
@@ -1672,6 +1681,8 @@ async fn main() -> Result<()> {
                 registry_username,
                 registry_token,
                 gpu,
+                oidc_issuer,
+                oidc_audience,
             } => {
                 let gpu = if gpu {
                     vec!["auto".to_string()]
@@ -1690,6 +1701,8 @@ async fn main() -> Result<()> {
                     registry_username.as_deref(),
                     registry_token.as_deref(),
                     gpu,
+                    oidc_issuer.as_deref(),
+                    &oidc_audience,
                 )
                 .await?;
             }

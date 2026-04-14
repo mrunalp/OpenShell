@@ -483,6 +483,8 @@ pub async fn ensure_container(
     registry_token: Option<&str>,
     device_ids: &[String],
     resume: bool,
+    oidc_issuer: Option<&str>,
+    oidc_audience: &str,
 ) -> Result<u16> {
     let container_name = container_name(name);
 
@@ -762,6 +764,13 @@ pub async fn ensure_container(
     // HelmChart CR so k8s workloads can request nvidia.com/gpu resources.
     if !device_ids.is_empty() {
         env_vars.push("GPU_ENABLED=true".to_string());
+    }
+
+    // OIDC JWT authentication: pass issuer and audience to the entrypoint
+    // so the HelmChart manifest configures the server pod for JWT validation.
+    if let Some(issuer) = oidc_issuer {
+        env_vars.push(format!("OIDC_ISSUER={issuer}"));
+        env_vars.push(format!("OIDC_AUDIENCE={oidc_audience}"));
     }
 
     let env = Some(env_vars);
