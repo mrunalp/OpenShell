@@ -262,9 +262,10 @@ pub async fn build_channel(server: &str, tls: &TlsOptions) -> Result<Channel> {
         return endpoint.connect().await.into_diagnostic();
     }
 
-    // When edge bearer auth is active and the server is HTTPS,
+    // When Cloudflare edge bearer auth is active and the server is HTTPS,
     // route traffic through a local WebSocket tunnel proxy instead.
-    if tls.is_bearer_auth() && server.starts_with("https://") {
+    // OIDC tokens bypass the tunnel — they connect directly.
+    if tls.edge_token.is_some() && server.starts_with("https://") {
         let token = tls
             .edge_token
             .as_deref()
