@@ -47,6 +47,57 @@ pub fn is_skip_method(path: &str) -> bool {
         || SKIP_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
 }
 
+/// gRPC methods that require the `openshell-admin` role.
+/// All other authenticated methods require `openshell-user`.
+const ADMIN_METHODS: &[&str] = &[
+    // Provider management
+    "/openshell.v1.OpenShell/CreateProvider",
+    "/openshell.v1.OpenShell/UpdateProvider",
+    "/openshell.v1.OpenShell/DeleteProvider",
+    // Global config and policy
+    "/openshell.v1.OpenShell/UpdateConfig",
+    // Draft policy approvals
+    "/openshell.v1.OpenShell/ApproveDraftChunk",
+    "/openshell.v1.OpenShell/ApproveAllDraftChunks",
+    "/openshell.v1.OpenShell/RejectDraftChunk",
+    "/openshell.v1.OpenShell/EditDraftChunk",
+    "/openshell.v1.OpenShell/UndoDraftChunk",
+    "/openshell.v1.OpenShell/ClearDraftChunks",
+];
+
+const ROLE_ADMIN: &str = "openshell-admin";
+const ROLE_USER: &str = "openshell-user";
+
+/// Returns the role required to call the given gRPC method.
+/// Admin methods require `openshell-admin`; all others require `openshell-user`.
+pub fn required_role_for_method(path: &str) -> &'static str {
+    if ADMIN_METHODS.contains(&path) {
+        ROLE_ADMIN
+    } else {
+        ROLE_USER
+    }
+}
+
+/// Check that the validated claims include the required role for the method.
+pub fn check_role(claims: &OidcClaims, path: &str) -> Result<(), Status> {
+    let required = required_role_for_method(path);
+    let roles = claims.roles();
+    if roles.iter().any(|r| r == required) {
+        Ok(())
+    } else {
+        debug!(
+            sub = %claims.sub,
+            required_role = required,
+            user_roles = ?roles,
+            method = path,
+            "OIDC role check failed"
+        );
+        Err(Status::permission_denied(format!(
+            "role '{required}' required"
+        )))
+    }
+}
+
 /// Cached JWKS key set fetched from the OIDC issuer.
 pub struct JwksCache {
     keys: Arc<RwLock<HashMap<String, DecodingKey>>>,
@@ -283,5 +334,69 @@ mod tests {
     #[test]
     fn skip_list_allows_grpc_health() {
         assert!(is_skip_method("/grpc.health.v1.Health/Check"));
+    }
+
+    #[test]
+    fn admin_methods_require_admin_role() {
+        assert_eq!(
+            required_role_for_method("/openshell.v1.OpenShell/CreateProvider"),
+            "openshell-admin"
+        );
+        assert_eq!(
+            required_role_for_method("/openshell.v1.OpenShell/UpdateConfig"),
+            "openshell-admin"
+        );
+        assert_eq!(
+            required_role_for_method("/openshell.v1.OpenShell/ApproveDraftChunk"),
+            "openshell-admin"
+        );
+    }
+
+    #[test]
+    fn sandbox_methods_require_user_role() {
+        assert_eq!(
+            required_role_for_method("/openshell.v1.OpenShell/CreateSandbox"),
+            "openshell-user"
+        );
+        assert_eq!(
+            required_role_for_method("/openshell.v1.OpenShell/ListSandboxes"),
+            "openshell-user"
+        );
+    }
+
+    fn claims_with_roles(roles: &[&str]) -> OidcClaims {
+        OidcClaims {
+            sub: "test-user".to_string(),
+            preferred_username: None,
+            email: None,
+            realm_access: Some(RealmAccess {
+                roles: roles.iter().map(|r| (*r).to_string()).collect(),
+            }),
+        }
+    }
+
+    #[test]
+    fn check_role_accepts_matching_role() {
+        let claims = claims_with_roles(&["openshell-user"]);
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes").is_ok());
+    }
+
+    #[test]
+    fn check_role_rejects_missing_role() {
+        let claims = claims_with_roles(&["openshell-user"]);
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider").is_err());
+    }
+
+    #[test]
+    fn check_role_admin_has_admin_access() {
+        let claims = claims_with_roles(&["openshell-admin", "openshell-user"]);
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider").is_ok());
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes").is_ok());
+    }
+
+    #[test]
+    fn check_role_rejects_empty_roles() {
+        let claims = claims_with_roles(&[]);
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes").is_err());
     }
 }

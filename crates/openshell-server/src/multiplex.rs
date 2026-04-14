@@ -207,7 +207,18 @@ where
             };
 
             // Validate the JWT.
-            if let Err(status) = cache.validate_token(token).await {
+            let claims = match cache.validate_token(token).await {
+                Ok(claims) => claims,
+                Err(status) => {
+                    let response = status.into_http();
+                    let (parts, body) = response.into_parts();
+                    let body = tonic::body::BoxBody::new(body);
+                    return Ok(Response::from_parts(parts, body));
+                }
+            };
+
+            // Check RBAC: verify the user has the required role for this method.
+            if let Err(status) = oidc::check_role(&claims, &path) {
                 let response = status.into_http();
                 let (parts, body) = response.into_parts();
                 let body = tonic::body::BoxBody::new(body);
