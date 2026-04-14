@@ -26,6 +26,7 @@ mod grpc;
 mod http;
 mod inference;
 mod multiplex;
+pub mod oidc;
 mod persistence;
 mod sandbox_index;
 mod sandbox_watch;
@@ -85,6 +86,9 @@ pub struct ServerState {
     /// set/delete operation, including the precedence check on sandbox
     /// mutations that reads global state.
     pub settings_mutex: tokio::sync::Mutex<()>,
+
+    /// OIDC JWKS cache for JWT validation. `None` when OIDC is not configured.
+    pub oidc_cache: Option<Arc<oidc::JwksCache>>,
 }
 
 fn is_benign_tls_handshake_failure(error: &std::io::Error) -> bool {
@@ -104,6 +108,7 @@ impl ServerState {
         sandbox_index: SandboxIndex,
         sandbox_watch_bus: SandboxWatchBus,
         tracing_log_bus: TracingLogBus,
+        oidc_cache: Option<Arc<oidc::JwksCache>>,
     ) -> Self {
         Self {
             config,
@@ -115,6 +120,7 @@ impl ServerState {
             ssh_connections_by_token: Mutex::new(HashMap::new()),
             ssh_connections_by_sandbox: Mutex::new(HashMap::new()),
             settings_mutex: tokio::sync::Mutex::new(()),
+            oidc_cache,
         }
     }
 }
@@ -143,6 +149,16 @@ pub async fn run_server(
 
     let store = Arc::new(Store::connect(database_url).await?);
 
+    let oidc_cache = if let Some(ref oidc) = config.oidc {
+        let cache = oidc::JwksCache::new(oidc)
+            .await
+            .map_err(|e| Error::config(format!("OIDC initialization failed: {e}")))?;
+        info!("OIDC JWT validation enabled (issuer: {})", oidc.issuer);
+        Some(Arc::new(cache))
+    } else {
+        None
+    };
+
     let sandbox_index = SandboxIndex::new();
     let sandbox_watch_bus = SandboxWatchBus::new();
     let compute = build_compute_runtime(
@@ -161,6 +177,7 @@ pub async fn run_server(
         sandbox_index,
         sandbox_watch_bus,
         tracing_log_bus,
+        oidc_cache,
     ));
 
     state.compute.spawn_watchers();

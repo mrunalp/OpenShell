@@ -895,8 +895,7 @@ fn plaintext_gateway_metadata(
         remote_host,
         resolved_host,
         auth_mode: Some("plaintext".to_string()),
-        edge_team_domain: None,
-        edge_auth_url: None,
+        ..Default::default()
     }
 }
 
@@ -962,6 +961,8 @@ pub async fn gateway_add(
     remote: Option<&str>,
     ssh_key: Option<&str>,
     local: bool,
+    oidc_issuer: Option<&str>,
+    oidc_client_id: &str,
 ) -> Result<()> {
     // If the endpoint starts with ssh://, parse it into an SSH destination
     // and a gateway endpoint automatically.  The host is resolved via
@@ -1043,6 +1044,64 @@ pub async fn gateway_add(
         ));
     }
 
+    // OIDC takes precedence over plaintext/mTLS/edge detection — the user
+    // explicitly opted in with --oidc-issuer regardless of scheme.
+    if let Some(issuer) = oidc_issuer {
+        let metadata = GatewayMetadata {
+            name: name.to_string(),
+            gateway_endpoint: endpoint.clone(),
+            is_remote: true,
+            auth_mode: Some("oidc".to_string()),
+            oidc_issuer: Some(issuer.to_string()),
+            oidc_client_id: Some(oidc_client_id.to_string()),
+            ..Default::default()
+        };
+
+        store_gateway_metadata(name, &metadata)?;
+        save_active_gateway(name)?;
+
+        eprintln!(
+            "{} Gateway '{}' added and set as active",
+            "✓".green().bold(),
+            name,
+        );
+        eprintln!("  {} {}", "Endpoint:".dimmed(), endpoint);
+        eprintln!("  {} oidc", "Auth:".dimmed());
+        eprintln!();
+
+        // Check for client_credentials env var (CI mode).
+        if std::env::var("OPENSHELL_OIDC_CLIENT_SECRET").is_ok() {
+            match crate::oidc_auth::oidc_client_credentials_flow(issuer, oidc_client_id).await {
+                Ok(bundle) => {
+                    openshell_bootstrap::oidc_token::store_oidc_token(name, &bundle)?;
+                    eprintln!(
+                        "{} Authenticated via client credentials",
+                        "✓".green().bold()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("{} Authentication failed: {e}", "!".yellow());
+                }
+            }
+        } else {
+            match crate::oidc_auth::oidc_browser_auth_flow(issuer, oidc_client_id).await {
+                Ok(bundle) => {
+                    openshell_bootstrap::oidc_token::store_oidc_token(name, &bundle)?;
+                    eprintln!("{} Authenticated successfully", "✓".green().bold());
+                }
+                Err(e) => {
+                    eprintln!("{} Authentication skipped: {e}", "!".yellow());
+                    eprintln!(
+                        "  Authenticate later with: {}",
+                        "openshell gateway login".dimmed(),
+                    );
+                }
+            }
+        }
+
+        return Ok(());
+    }
+
     if endpoint.starts_with("http://") {
         let metadata = plaintext_gateway_metadata(name, &endpoint, remote, local);
         let gateway_type = gateway_type_label(&metadata);
@@ -1098,8 +1157,7 @@ pub async fn gateway_add(
             remote_host,
             resolved_host,
             auth_mode: Some("mtls".to_string()),
-            edge_team_domain: None,
-            edge_auth_url: None,
+            ..Default::default()
         };
 
         store_gateway_metadata(name, &metadata)?;
@@ -1123,12 +1181,8 @@ pub async fn gateway_add(
             name: name.to_string(),
             gateway_endpoint: endpoint.clone(),
             is_remote: true,
-            gateway_port: 0,
-            remote_host: None,
-            resolved_host: None,
             auth_mode: Some("cloudflare_jwt".to_string()),
-            edge_team_domain: None,
-            edge_auth_url: None,
+            ..Default::default()
         };
 
         store_gateway_metadata(name, &metadata)?;
@@ -1161,9 +1215,9 @@ pub async fn gateway_add(
     Ok(())
 }
 
-/// Re-authenticate with an edge-authenticated gateway.
+/// Re-authenticate with an edge-authenticated or OIDC gateway.
 ///
-/// Opens a browser for edge proxy login and stores the updated token.
+/// Dispatches to the appropriate auth flow based on `auth_mode`.
 pub async fn gateway_login(name: &str) -> Result<()> {
     let metadata = openshell_bootstrap::load_gateway_metadata(name).map_err(|_| {
         miette::miette!(
@@ -1172,15 +1226,33 @@ pub async fn gateway_login(name: &str) -> Result<()> {
         )
     })?;
 
-    if metadata.auth_mode.as_deref() != Some("cloudflare_jwt") {
-        return Err(miette::miette!(
-            "Gateway '{name}' does not use edge authentication.\n\
-             Only edge-authenticated gateways support browser login."
-        ));
-    }
+    match metadata.auth_mode.as_deref() {
+        Some("cloudflare_jwt") => {
+            let token = crate::auth::browser_auth_flow(&metadata.gateway_endpoint).await?;
+            openshell_bootstrap::edge_token::store_edge_token(name, &token)?;
+        }
+        Some("oidc") => {
+            let issuer = metadata.oidc_issuer.as_deref().ok_or_else(|| {
+                miette::miette!("Gateway '{name}' has OIDC auth but no issuer URL in metadata")
+            })?;
+            let client_id = metadata.oidc_client_id.as_deref().unwrap_or("openshell-cli");
 
-    let token = crate::auth::browser_auth_flow(&metadata.gateway_endpoint).await?;
-    openshell_bootstrap::edge_token::store_edge_token(name, &token)?;
+            if std::env::var("OPENSHELL_OIDC_CLIENT_SECRET").is_ok() {
+                let bundle =
+                    crate::oidc_auth::oidc_client_credentials_flow(issuer, client_id).await?;
+                openshell_bootstrap::oidc_token::store_oidc_token(name, &bundle)?;
+            } else {
+                let bundle = crate::oidc_auth::oidc_browser_auth_flow(issuer, client_id).await?;
+                openshell_bootstrap::oidc_token::store_oidc_token(name, &bundle)?;
+            }
+        }
+        _ => {
+            return Err(miette::miette!(
+                "Gateway '{name}' does not use edge or OIDC authentication.\n\
+                 Only edge-authenticated and OIDC gateways support browser login."
+            ));
+        }
+    }
 
     eprintln!("{} Authenticated to gateway '{name}'", "✓".green().bold(),);
 
@@ -5273,12 +5345,8 @@ mod tests {
             name: name.to_string(),
             gateway_endpoint: endpoint.to_string(),
             is_remote: true,
-            gateway_port: 0,
-            remote_host: None,
-            resolved_host: None,
             auth_mode: Some("cloudflare_jwt".to_string()),
-            edge_team_domain: None,
-            edge_auth_url: None,
+            ..Default::default()
         }
     }
 
@@ -5660,13 +5728,8 @@ mod tests {
             GatewayMetadata {
                 name: "local".to_string(),
                 gateway_endpoint: "http://127.0.0.1:8080".to_string(),
-                is_remote: false,
                 gateway_port: 8080,
-                remote_host: None,
-                resolved_host: None,
-                auth_mode: None,
-                edge_team_domain: None,
-                edge_auth_url: None,
+                ..Default::default()
             },
         ];
 
@@ -5695,13 +5758,8 @@ mod tests {
         let gateway = GatewayMetadata {
             name: "local".to_string(),
             gateway_endpoint: "https://127.0.0.1:8080".to_string(),
-            is_remote: false,
             gateway_port: 8080,
-            remote_host: None,
-            resolved_host: None,
-            auth_mode: None,
-            edge_team_domain: None,
-            edge_auth_url: None,
+            ..Default::default()
         };
 
         assert_eq!(gateway_auth_label(&gateway), "mtls");
@@ -5746,7 +5804,7 @@ mod tests {
         with_tmp_xdg(tmpdir.path(), || {
             let runtime = tokio::runtime::Runtime::new().expect("create runtime");
             runtime.block_on(async {
-                gateway_add("http://127.0.0.1:8080", None, None, None, false)
+                gateway_add("http://127.0.0.1:8080", None, None, None, false, None, "openshell-cli")
                     .await
                     .expect("register plaintext gateway");
             });
@@ -5771,6 +5829,8 @@ mod tests {
                     None,
                     None,
                     true,
+                    None,
+                    "openshell-cli",
                 )
                 .await
                 .expect("register plaintext gateway");

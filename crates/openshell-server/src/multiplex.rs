@@ -25,7 +25,7 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tower::ServiceExt;
 
-use crate::{OpenShellService, ServerState, http_router, inference::InferenceService};
+use crate::{OpenShellService, ServerState, http_router, inference::InferenceService, oidc};
 
 /// Maximum inbound gRPC message size (1 MB).
 ///
@@ -57,7 +57,11 @@ impl MultiplexService {
             .max_decoding_message_size(MAX_GRPC_DECODE_SIZE);
         let inference = InferenceServer::new(InferenceService::new(self.state.clone()))
             .max_decoding_message_size(MAX_GRPC_DECODE_SIZE);
-        let grpc_service = GrpcRouter::new(openshell, inference);
+        let grpc_service = OidcGrpcRouter::new(
+            GrpcRouter::new(openshell, inference),
+            self.state.oidc_cache.clone(),
+            self.state.config.oidc.clone(),
+        );
         let http_service = http_router(self.state.clone());
 
         let service = MultiplexedService::new(grpc_service, http_service);
@@ -120,6 +124,98 @@ where
             let mut svc = self.openshell.clone();
             Box::pin(async move { svc.ready().await?.call(req).await })
         }
+    }
+}
+
+/// gRPC router wrapper that validates OIDC Bearer tokens when configured.
+///
+/// When `oidc_cache` is `Some`, extracts the `authorization: Bearer <token>`
+/// header from incoming requests and validates the JWT before forwarding to
+/// the inner gRPC router. Requests to methods on the skip list (health checks,
+/// sandbox-to-server RPCs) bypass validation.
+#[derive(Clone)]
+pub struct OidcGrpcRouter<S> {
+    inner: S,
+    oidc_cache: Option<Arc<oidc::JwksCache>>,
+    oidc_config: Option<openshell_core::OidcConfig>,
+}
+
+impl<S> OidcGrpcRouter<S> {
+    fn new(
+        inner: S,
+        oidc_cache: Option<Arc<oidc::JwksCache>>,
+        oidc_config: Option<openshell_core::OidcConfig>,
+    ) -> Self {
+        Self {
+            inner,
+            oidc_cache,
+            oidc_config,
+        }
+    }
+}
+
+impl<S, B> tower::Service<Request<B>> for OidcGrpcRouter<S>
+where
+    S: tower::Service<Request<B>, Response = Response<tonic::body::BoxBody>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send,
+    S::Error: Send + Into<Box<dyn std::error::Error + Send + Sync>>,
+    B: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: Request<B>) -> Self::Future {
+        let oidc_cache = self.oidc_cache.clone();
+        let _oidc_config = self.oidc_config.clone();
+        let mut inner = self.inner.clone();
+
+        Box::pin(async move {
+            // If OIDC is not configured, pass through directly.
+            let Some(cache) = oidc_cache else {
+                return inner.ready().await?.call(req).await;
+            };
+
+            let path = req.uri().path().to_string();
+
+            // Skip OIDC validation for health and sandbox-to-server RPCs.
+            if oidc::is_skip_method(&path) {
+                return inner.ready().await?.call(req).await;
+            }
+
+            // Extract Bearer token from the authorization header.
+            let token = req
+                .headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "));
+
+            let Some(token) = token else {
+                let status = tonic::Status::unauthenticated("missing authorization header");
+                let response = status.into_http();
+                // Convert the response body type.
+                let (parts, body) = response.into_parts();
+                let body = tonic::body::BoxBody::new(body);
+                return Ok(Response::from_parts(parts, body));
+            };
+
+            // Validate the JWT.
+            if let Err(status) = cache.validate_token(token).await {
+                let response = status.into_http();
+                let (parts, body) = response.into_parts();
+                let body = tonic::body::BoxBody::new(body);
+                return Ok(Response::from_parts(parts, body));
+            }
+
+            inner.ready().await?.call(req).await
+        })
     }
 }
 

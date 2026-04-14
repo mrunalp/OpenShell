@@ -4,6 +4,7 @@
 pub mod build;
 pub mod edge_token;
 pub mod errors;
+pub mod oidc_token;
 pub mod image;
 
 pub mod constants;

@@ -98,6 +98,14 @@ spec:
               value: "true"
             {{- end }}
             {{- end }}
+            {{- if .Values.server.oidc.issuer }}
+            - name: OPENSHELL_OIDC_ISSUER
+              value: {{ .Values.server.oidc.issuer | quote }}
+            - name: OPENSHELL_OIDC_AUDIENCE
+              value: {{ .Values.server.oidc.audience | quote }}
+            - name: OPENSHELL_OIDC_JWKS_TTL
+              value: {{ .Values.server.oidc.jwksTtl | quote }}
+            {{- end }}
           volumeMounts:
             - name: openshell-data
               mountPath: /var/openshell

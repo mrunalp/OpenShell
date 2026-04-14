@@ -172,6 +172,20 @@ struct Args {
     /// certificate. Ignored when --disable-tls is set.
     #[arg(long, env = "OPENSHELL_DISABLE_GATEWAY_AUTH")]
     disable_gateway_auth: bool,
+
+    /// OIDC issuer URL for JWT-based authentication.
+    /// When set, the server validates `authorization: Bearer` tokens on gRPC
+    /// requests against the issuer's JWKS endpoint.
+    #[arg(long, env = "OPENSHELL_OIDC_ISSUER")]
+    oidc_issuer: Option<String>,
+
+    /// Expected OIDC audience claim (typically the client ID).
+    #[arg(long, env = "OPENSHELL_OIDC_AUDIENCE", default_value = "openshell-cli")]
+    oidc_audience: String,
+
+    /// JWKS key cache TTL in seconds.
+    #[arg(long, env = "OPENSHELL_OIDC_JWKS_TTL", default_value_t = 3600)]
+    oidc_jwks_ttl: u64,
 }
 
 pub fn command() -> Command {
@@ -258,6 +272,14 @@ async fn run_from_args(args: Args) -> Result<()> {
 
     if let Some(ip) = args.host_gateway_ip {
         config = config.with_host_gateway_ip(ip);
+    }
+
+    if let Some(issuer) = args.oidc_issuer {
+        config = config.with_oidc(openshell_core::OidcConfig {
+            issuer,
+            audience: args.oidc_audience,
+            jwks_ttl_secs: args.oidc_jwks_ttl,
+        });
     }
 
     let vm_config = VmComputeConfig {

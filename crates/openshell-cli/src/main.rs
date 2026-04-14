@@ -122,17 +122,26 @@ fn resolve_gateway_name(gateway_flag: &Option<String>) -> Option<String> {
         .or_else(load_active_gateway)
 }
 
-/// Apply edge authentication token from local storage when the gateway uses edge auth.
+/// Apply authentication token from local storage based on gateway auth mode.
 ///
-/// When the resolved gateway has `auth_mode == "cloudflare_jwt"`, loads the
-/// stored edge token from disk and sets it on the `TlsOptions`. The token is
-/// always read from gateway metadata rather than supplied via a CLI flag.
-fn apply_edge_auth(tls: &mut TlsOptions, gateway_name: &str) {
-    if let Some(meta) = get_gateway_metadata(gateway_name)
-        && meta.auth_mode.as_deref() == Some("cloudflare_jwt")
-        && let Some(token) = load_edge_token(gateway_name)
-    {
-        tls.edge_token = Some(token);
+/// Handles both Cloudflare Access (`edge_token`) and OIDC (`oidc_token`)
+/// auth modes by loading the stored token and setting it on `TlsOptions`.
+fn apply_auth(tls: &mut TlsOptions, gateway_name: &str) {
+    let Some(meta) = get_gateway_metadata(gateway_name) else {
+        return;
+    };
+    match meta.auth_mode.as_deref() {
+        Some("cloudflare_jwt") => {
+            if let Some(token) = load_edge_token(gateway_name) {
+                tls.edge_token = Some(token);
+            }
+        }
+        Some("oidc") => {
+            if let Some(bundle) = openshell_bootstrap::oidc_token::load_oidc_token(gateway_name) {
+                tls.oidc_token = Some(bundle.access_token);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -895,9 +904,18 @@ enum GatewayCommands {
         /// With `http://...`, stores a local plaintext registration instead.
         #[arg(long, conflicts_with = "remote")]
         local: bool,
+
+        /// Register as an OIDC-authenticated gateway using the given issuer URL.
+        /// The server must be configured with `--oidc-issuer` matching this URL.
+        #[arg(long, conflicts_with_all = ["remote", "local"])]
+        oidc_issuer: Option<String>,
+
+        /// OIDC client ID (defaults to "openshell-cli").
+        #[arg(long, default_value = "openshell-cli", requires = "oidc_issuer")]
+        oidc_client_id: String,
     },
 
-    /// Authenticate with an edge-authenticated gateway.
+    /// Authenticate with an edge-authenticated or OIDC gateway.
     ///
     /// Opens a browser for the edge proxy's login flow and stores the
     /// token locally. Use this to re-authenticate when a token expires.
@@ -1701,6 +1719,8 @@ async fn main() -> Result<()> {
                 remote,
                 ssh_key,
                 local,
+                oidc_issuer,
+                oidc_client_id,
             } => {
                 run::gateway_add(
                     &endpoint,
@@ -1708,6 +1728,8 @@ async fn main() -> Result<()> {
                     remote.as_deref(),
                     ssh_key.as_deref(),
                     local,
+                    oidc_issuer.as_deref(),
+                    &oidc_client_id,
                 )
                 .await?;
             }
@@ -1784,7 +1806,7 @@ async fn main() -> Result<()> {
         Some(Commands::Status) => {
             if let Ok(ctx) = resolve_gateway(&cli.gateway, &cli.gateway_endpoint) {
                 let mut tls = tls.with_gateway_name(&ctx.name);
-                apply_edge_auth(&mut tls, &ctx.name);
+                apply_auth(&mut tls, &ctx.name);
                 run::gateway_status(&ctx.name, &ctx.endpoint, &tls).await?;
             } else {
                 println!("{}", "Gateway Status".cyan().bold());
@@ -1883,7 +1905,7 @@ async fn main() -> Result<()> {
                 let spec = openshell_core::forward::ForwardSpec::parse(&port)?;
                 let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
                 let mut tls = tls.with_gateway_name(&ctx.name);
-                apply_edge_auth(&mut tls, &ctx.name);
+                apply_auth(&mut tls, &ctx.name);
                 let name = resolve_sandbox_name(name, &ctx.name)?;
                 run::sandbox_forward(&ctx.endpoint, &name, &spec, background, &tls).await?;
                 if background {
@@ -1911,7 +1933,7 @@ async fn main() -> Result<()> {
         }) => {
             let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
             let mut tls = tls.with_gateway_name(&ctx.name);
-            apply_edge_auth(&mut tls, &ctx.name);
+            apply_auth(&mut tls, &ctx.name);
             let name = resolve_sandbox_name(name, &ctx.name)?;
             run::sandbox_logs(
                 &ctx.endpoint,
@@ -1956,7 +1978,7 @@ async fn main() -> Result<()> {
         }) => {
             let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
             let mut tls = tls.with_gateway_name(&ctx.name);
-            apply_edge_auth(&mut tls, &ctx.name);
+            apply_auth(&mut tls, &ctx.name);
             match policy_cmd {
                 PolicyCommands::Set {
                     name,
@@ -2033,7 +2055,7 @@ async fn main() -> Result<()> {
         }) => {
             let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
             let mut tls = tls.with_gateway_name(&ctx.name);
-            apply_edge_auth(&mut tls, &ctx.name);
+            apply_auth(&mut tls, &ctx.name);
 
             match settings_cmd {
                 SettingsCommands::Get { name, global, json } => {
@@ -2087,7 +2109,7 @@ async fn main() -> Result<()> {
         }) => {
             let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
             let mut tls = tls.with_gateway_name(&ctx.name);
-            apply_edge_auth(&mut tls, &ctx.name);
+            apply_auth(&mut tls, &ctx.name);
             match draft_cmd {
                 DraftCommands::Get { name, status } => {
                     let name = resolve_sandbox_name(name, &ctx.name)?;
@@ -2140,7 +2162,7 @@ async fn main() -> Result<()> {
             let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
             let endpoint = &ctx.endpoint;
             let mut tls = tls.with_gateway_name(&ctx.name);
-            apply_edge_auth(&mut tls, &ctx.name);
+            apply_auth(&mut tls, &ctx.name);
             match command {
                 InferenceCommands::Set {
                     provider,
@@ -2265,7 +2287,7 @@ async fn main() -> Result<()> {
                             }
                             let endpoint = &ctx.endpoint;
                             let mut tls = tls.with_gateway_name(&ctx.name);
-                            apply_edge_auth(&mut tls, &ctx.name);
+                            apply_auth(&mut tls, &ctx.name);
                             // The user already has a configured gateway. Disable
                             // auto-bootstrap in the retry path so we don't
                             // silently replace their selected gateway with a new
@@ -2323,7 +2345,7 @@ async fn main() -> Result<()> {
                 } => {
                     let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
                     let mut tls = tls.with_gateway_name(&ctx.name);
-                    apply_edge_auth(&mut tls, &ctx.name);
+                    apply_auth(&mut tls, &ctx.name);
                     let sandbox_dest = dest.as_deref();
                     let local = std::path::Path::new(&local_path);
                     if !local.exists() {
@@ -2358,7 +2380,7 @@ async fn main() -> Result<()> {
                 } => {
                     let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
                     let mut tls = tls.with_gateway_name(&ctx.name);
-                    apply_edge_auth(&mut tls, &ctx.name);
+                    apply_auth(&mut tls, &ctx.name);
                     let local_dest = std::path::Path::new(dest.as_deref().unwrap_or("."));
                     eprintln!(
                         "Downloading sandbox:{} -> {}",
@@ -2373,7 +2395,7 @@ async fn main() -> Result<()> {
                     let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
                     let endpoint = &ctx.endpoint;
                     let mut tls = tls.with_gateway_name(&ctx.name);
-                    apply_edge_auth(&mut tls, &ctx.name);
+                    apply_auth(&mut tls, &ctx.name);
                     match other {
                         SandboxCommands::Create { .. }
                         | SandboxCommands::Upload { .. }
@@ -2453,7 +2475,7 @@ async fn main() -> Result<()> {
             let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
             let endpoint = &ctx.endpoint;
             let mut tls = tls.with_gateway_name(&ctx.name);
-            apply_edge_auth(&mut tls, &ctx.name);
+            apply_auth(&mut tls, &ctx.name);
 
             match command {
                 ProviderCommands::Create {
@@ -2508,7 +2530,7 @@ async fn main() -> Result<()> {
         Some(Commands::Term { theme }) => {
             let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
             let mut tls = tls.with_gateway_name(&ctx.name);
-            apply_edge_auth(&mut tls, &ctx.name);
+            apply_auth(&mut tls, &ctx.name);
             let channel = openshell_cli::tls::build_channel(&ctx.endpoint, &tls).await?;
             openshell_tui::run(channel, &ctx.name, &ctx.endpoint, theme).await?;
         }
@@ -2540,7 +2562,7 @@ async fn main() -> Result<()> {
                         None => tls,
                     };
                     if let Some(ref g) = gateway_name_opt {
-                        apply_edge_auth(&mut effective_tls, g);
+                        apply_auth(&mut effective_tls, g);
                     }
                     run::sandbox_ssh_proxy(&gw, &sid, &tok, &effective_tls).await?;
                 }
@@ -2559,7 +2581,7 @@ async fn main() -> Result<()> {
                         meta.gateway_endpoint
                     };
                     let mut tls = tls.with_gateway_name(&g);
-                    apply_edge_auth(&mut tls, &g);
+                    apply_auth(&mut tls, &g);
                     run::sandbox_ssh_proxy_by_name(&endpoint, &n, &tls).await?;
                 }
                 // Legacy name mode with --server only (no --gateway-name).
@@ -2695,12 +2717,8 @@ mod tests {
             name: name.to_string(),
             gateway_endpoint: endpoint.to_string(),
             is_remote: true,
-            gateway_port: 0,
-            remote_host: None,
-            resolved_host: None,
             auth_mode: Some("cloudflare_jwt".to_string()),
-            edge_team_domain: None,
-            edge_auth_url: None,
+            ..Default::default()
         }
     }
 
@@ -3119,7 +3137,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_edge_auth_uses_stored_token() {
+    fn apply_auth_uses_stored_token() {
         let tmp = tempfile::tempdir().unwrap();
         with_tmp_xdg(tmp.path(), || {
             store_gateway_metadata(
@@ -3130,7 +3148,7 @@ mod tests {
             store_edge_token("edge-gateway", "token-123").unwrap();
 
             let mut tls = TlsOptions::default();
-            apply_edge_auth(&mut tls, "edge-gateway");
+            apply_auth(&mut tls, "edge-gateway");
 
             assert_eq!(tls.edge_token.as_deref(), Some("token-123"));
         });
