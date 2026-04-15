@@ -1259,6 +1259,37 @@ pub async fn gateway_login(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Clear stored authentication credentials for a gateway.
+pub fn gateway_logout(name: &str) -> Result<()> {
+    let metadata = openshell_bootstrap::load_gateway_metadata(name).map_err(|_| {
+        miette::miette!(
+            "Unknown gateway '{name}'.\n\
+             List available gateways: openshell gateway select"
+        )
+    })?;
+
+    match metadata.auth_mode.as_deref() {
+        Some("oidc") => {
+            openshell_bootstrap::oidc_token::remove_oidc_token(name)?;
+        }
+        Some("cloudflare_jwt") => {
+            openshell_bootstrap::edge_token::remove_edge_token(name)?;
+        }
+        _ => {
+            return Err(miette::miette!(
+                "Gateway '{name}' uses {} authentication — no stored credentials to clear.",
+                metadata.auth_mode.as_deref().unwrap_or("mtls")
+            ));
+        }
+    }
+
+    eprintln!(
+        "{} Logged out of gateway '{name}'",
+        "✓".green().bold(),
+    );
+    Ok(())
+}
+
 /// List all provisioned gateways.
 pub fn gateway_list(gateway_flag: &Option<String>) -> Result<()> {
     let gateways = list_gateways()?;

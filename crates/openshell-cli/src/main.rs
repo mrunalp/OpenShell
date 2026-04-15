@@ -935,6 +935,17 @@ enum GatewayCommands {
         name: Option<String>,
     },
 
+    /// Clear stored authentication credentials for a gateway.
+    ///
+    /// Removes the locally stored OIDC token or edge token so subsequent
+    /// commands require re-authentication via `gateway login`.
+    #[command(help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
+    Logout {
+        /// Gateway name (defaults to the active gateway).
+        #[arg(add = ArgValueCompleter::new(completers::complete_gateway_names))]
+        name: Option<String>,
+    },
+
     /// Select the active gateway.
     ///
     /// When called without a name, opens an interactive chooser on a TTY and
@@ -1757,6 +1768,18 @@ async fn main() -> Result<()> {
                         )
                     })?;
                 run::gateway_login(&name).await?;
+            }
+            GatewayCommands::Logout { name } => {
+                let name = name
+                    .or_else(|| resolve_gateway_name(&cli.gateway))
+                    .ok_or_else(|| {
+                        miette::miette!(
+                            "No active gateway.\n\
+                             Specify a gateway name: openshell gateway logout <name>\n\
+                             Or set one with: openshell gateway select <name>"
+                        )
+                    })?;
+                run::gateway_logout(&name)?;
             }
             GatewayCommands::Select { name } => {
                 run::gateway_select(name.as_deref(), &cli.gateway)?;
