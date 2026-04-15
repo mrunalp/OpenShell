@@ -186,6 +186,19 @@ struct Args {
     /// JWKS key cache TTL in seconds.
     #[arg(long, env = "OPENSHELL_OIDC_JWKS_TTL", default_value_t = 3600)]
     oidc_jwks_ttl: u64,
+
+    /// Dot-separated path to the roles array in the JWT claims.
+    /// Keycloak: "realm_access.roles" (default). Entra ID: "roles". Okta: "groups".
+    #[arg(long, env = "OPENSHELL_OIDC_ROLES_CLAIM", default_value = "realm_access.roles")]
+    oidc_roles_claim: String,
+
+    /// Role name that grants admin access.
+    #[arg(long, env = "OPENSHELL_OIDC_ADMIN_ROLE", default_value = "openshell-admin")]
+    oidc_admin_role: String,
+
+    /// Role name that grants standard user access.
+    #[arg(long, env = "OPENSHELL_OIDC_USER_ROLE", default_value = "openshell-user")]
+    oidc_user_role: String,
 }
 
 pub fn command() -> Command {
@@ -279,6 +292,9 @@ async fn run_from_args(args: Args) -> Result<()> {
             issuer,
             audience: args.oidc_audience,
             jwks_ttl_secs: args.oidc_jwks_ttl,
+            roles_claim: args.oidc_roles_claim,
+            admin_role: args.oidc_admin_role,
+            user_role: args.oidc_user_role,
         });
     }
 

@@ -65,30 +65,35 @@ const ADMIN_METHODS: &[&str] = &[
     "/openshell.v1.OpenShell/ClearDraftChunks",
 ];
 
-const ROLE_ADMIN: &str = "openshell-admin";
-const ROLE_USER: &str = "openshell-user";
-
-/// Returns the role required to call the given gRPC method.
-/// Admin methods require `openshell-admin`; all others require `openshell-user`.
-pub fn required_role_for_method(path: &str) -> &'static str {
-    if ADMIN_METHODS.contains(&path) {
-        ROLE_ADMIN
-    } else {
-        ROLE_USER
-    }
+/// Returns `true` if the method requires the admin role.
+pub fn is_admin_method(path: &str) -> bool {
+    ADMIN_METHODS.contains(&path)
 }
 
 /// Check that the validated claims include the required role for the method.
-pub fn check_role(claims: &OidcClaims, path: &str) -> Result<(), Status> {
-    let required = required_role_for_method(path);
-    let roles = claims.roles();
-    if roles.iter().any(|r| r == required) {
+///
+/// Uses the configured role names from `OidcConfig` so different OIDC
+/// providers (Keycloak, Entra ID, Okta) can use their own role naming.
+pub fn check_role(claims: &OidcClaims, path: &str, config: &OidcConfig) -> Result<(), Status> {
+    let required = if is_admin_method(path) {
+        &config.admin_role
+    } else {
+        &config.user_role
+    };
+
+    // If the required role is empty, skip RBAC (authentication-only mode).
+    // This supports providers like GitHub that don't emit roles in JWTs.
+    if required.is_empty() {
+        return Ok(());
+    }
+
+    if claims.roles.iter().any(|r| r == required) {
         Ok(())
     } else {
         debug!(
             sub = %claims.sub,
             required_role = required,
-            user_roles = ?roles,
+            user_roles = ?claims.roles,
             method = path,
             "OIDC role check failed"
         );
@@ -148,21 +153,35 @@ pub struct OidcClaims {
     pub preferred_username: Option<String>,
     #[serde(default)]
     pub email: Option<String>,
-    #[serde(default)]
-    pub realm_access: Option<RealmAccess>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RealmAccess {
-    #[serde(default)]
+    /// Roles extracted from the configurable claim path.
+    #[serde(skip)]
     pub roles: Vec<String>,
+    /// Raw claims for flexible role extraction.
+    #[serde(flatten)]
+    extra: serde_json::Value,
 }
 
 impl OidcClaims {
-    pub fn roles(&self) -> &[String] {
-        self.realm_access
-            .as_ref()
-            .map_or(&[], |ra| ra.roles.as_slice())
+    /// Extract roles from the JWT claims using a dot-separated path.
+    ///
+    /// Supports paths like:
+    /// - `realm_access.roles` (Keycloak)
+    /// - `roles` (Entra ID)
+    /// - `groups` (Okta)
+    fn extract_roles(&mut self, roles_claim: &str) {
+        let mut value = &self.extra;
+        for segment in roles_claim.split('.') {
+            match value.get(segment) {
+                Some(v) => value = v,
+                None => return,
+            }
+        }
+        if let Some(arr) = value.as_array() {
+            self.roles = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+        }
     }
 }
 
@@ -302,7 +321,9 @@ impl JwksCache {
             Status::unauthenticated(format!("invalid token: {e}"))
         })?;
 
-        Ok(token_data.claims)
+        let mut claims = token_data.claims;
+        claims.extract_roles(&self.config.roles_claim);
+        Ok(claims)
     }
 }
 
@@ -337,31 +358,23 @@ mod tests {
     }
 
     #[test]
-    fn admin_methods_require_admin_role() {
-        assert_eq!(
-            required_role_for_method("/openshell.v1.OpenShell/CreateProvider"),
-            "openshell-admin"
-        );
-        assert_eq!(
-            required_role_for_method("/openshell.v1.OpenShell/UpdateConfig"),
-            "openshell-admin"
-        );
-        assert_eq!(
-            required_role_for_method("/openshell.v1.OpenShell/ApproveDraftChunk"),
-            "openshell-admin"
-        );
+    fn admin_methods_detected() {
+        assert!(is_admin_method("/openshell.v1.OpenShell/CreateProvider"));
+        assert!(is_admin_method("/openshell.v1.OpenShell/UpdateConfig"));
+        assert!(is_admin_method("/openshell.v1.OpenShell/ApproveDraftChunk"));
+        assert!(!is_admin_method("/openshell.v1.OpenShell/CreateSandbox"));
+        assert!(!is_admin_method("/openshell.v1.OpenShell/ListSandboxes"));
     }
 
-    #[test]
-    fn sandbox_methods_require_user_role() {
-        assert_eq!(
-            required_role_for_method("/openshell.v1.OpenShell/CreateSandbox"),
-            "openshell-user"
-        );
-        assert_eq!(
-            required_role_for_method("/openshell.v1.OpenShell/ListSandboxes"),
-            "openshell-user"
-        );
+    fn default_config() -> OidcConfig {
+        OidcConfig {
+            issuer: "http://localhost".to_string(),
+            audience: "test".to_string(),
+            jwks_ttl_secs: 3600,
+            roles_claim: "realm_access.roles".to_string(),
+            admin_role: "openshell-admin".to_string(),
+            user_role: "openshell-user".to_string(),
+        }
     }
 
     fn claims_with_roles(roles: &[&str]) -> OidcClaims {
@@ -369,34 +382,106 @@ mod tests {
             sub: "test-user".to_string(),
             preferred_username: None,
             email: None,
-            realm_access: Some(RealmAccess {
-                roles: roles.iter().map(|r| (*r).to_string()).collect(),
-            }),
+            roles: roles.iter().map(|r| (*r).to_string()).collect(),
+            extra: serde_json::Value::Null,
         }
     }
 
     #[test]
     fn check_role_accepts_matching_role() {
         let claims = claims_with_roles(&["openshell-user"]);
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes").is_ok());
+        let config = default_config();
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes", &config).is_ok());
     }
 
     #[test]
     fn check_role_rejects_missing_role() {
         let claims = claims_with_roles(&["openshell-user"]);
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider").is_err());
+        let config = default_config();
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider", &config).is_err());
     }
 
     #[test]
     fn check_role_admin_has_admin_access() {
         let claims = claims_with_roles(&["openshell-admin", "openshell-user"]);
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider").is_ok());
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes").is_ok());
+        let config = default_config();
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider", &config).is_ok());
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes", &config).is_ok());
     }
 
     #[test]
     fn check_role_rejects_empty_roles() {
         let claims = claims_with_roles(&[]);
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes").is_err());
+        let config = default_config();
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes", &config).is_err());
+    }
+
+    #[test]
+    fn check_role_skips_when_role_name_empty() {
+        // Simulates providers like GitHub that don't emit roles.
+        let claims = claims_with_roles(&[]);
+        let config = OidcConfig {
+            user_role: String::new(),
+            admin_role: String::new(),
+            ..default_config()
+        };
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes", &config).is_ok());
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider", &config).is_ok());
+    }
+
+    #[test]
+    fn check_role_custom_role_names() {
+        // Simulates Entra ID with custom role names.
+        let claims = claims_with_roles(&["OpenShell.Admin", "OpenShell.User"]);
+        let config = OidcConfig {
+            admin_role: "OpenShell.Admin".to_string(),
+            user_role: "OpenShell.User".to_string(),
+            ..default_config()
+        };
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider", &config).is_ok());
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes", &config).is_ok());
+    }
+
+    #[test]
+    fn extract_roles_keycloak_path() {
+        let json = serde_json::json!({
+            "sub": "user1",
+            "realm_access": { "roles": ["openshell-user", "openshell-admin"] }
+        });
+        let mut claims: OidcClaims = serde_json::from_value(json).unwrap();
+        claims.extract_roles("realm_access.roles");
+        assert_eq!(claims.roles, vec!["openshell-user", "openshell-admin"]);
+    }
+
+    #[test]
+    fn extract_roles_flat_path() {
+        // Entra ID / Okta style: roles at top level
+        let json = serde_json::json!({
+            "sub": "user1",
+            "roles": ["OpenShell.Admin", "OpenShell.User"]
+        });
+        let mut claims: OidcClaims = serde_json::from_value(json).unwrap();
+        claims.extract_roles("roles");
+        assert_eq!(claims.roles, vec!["OpenShell.Admin", "OpenShell.User"]);
+    }
+
+    #[test]
+    fn extract_roles_groups_path() {
+        // Okta style: groups claim
+        let json = serde_json::json!({
+            "sub": "user1",
+            "groups": ["everyone", "openshell-admin"]
+        });
+        let mut claims: OidcClaims = serde_json::from_value(json).unwrap();
+        claims.extract_roles("groups");
+        assert_eq!(claims.roles, vec!["everyone", "openshell-admin"]);
+    }
+
+    #[test]
+    fn extract_roles_missing_claim() {
+        let json = serde_json::json!({ "sub": "user1" });
+        let mut claims: OidcClaims = serde_json::from_value(json).unwrap();
+        claims.extract_roles("realm_access.roles");
+        assert!(claims.roles.is_empty());
     }
 }

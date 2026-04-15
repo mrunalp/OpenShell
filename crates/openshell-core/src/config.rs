@@ -171,6 +171,11 @@ pub struct TlsConfig {
 ///
 /// When configured, the server validates `authorization: Bearer <JWT>`
 /// headers on gRPC requests against the specified issuer's JWKS endpoint.
+///
+/// The roles claim path is configurable to support different providers:
+/// - Keycloak: `realm_access.roles` (default)
+/// - Entra ID / Okta: `roles`
+/// - Custom: any dot-separated path into the JWT claims
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OidcConfig {
     /// OIDC issuer URL (e.g., `http://localhost:8180/realms/openshell`).
@@ -182,10 +187,36 @@ pub struct OidcConfig {
     /// JWKS cache TTL in seconds. Defaults to 3600 (1 hour).
     #[serde(default = "default_jwks_ttl_secs")]
     pub jwks_ttl_secs: u64,
+
+    /// Dot-separated path to the roles array in the JWT claims.
+    /// Defaults to `realm_access.roles` (Keycloak).
+    /// Examples: `roles` (Entra ID), `groups` (Okta), `custom.path.roles`.
+    #[serde(default = "default_roles_claim")]
+    pub roles_claim: String,
+
+    /// Role name that grants admin access. Defaults to `openshell-admin`.
+    #[serde(default = "default_admin_role")]
+    pub admin_role: String,
+
+    /// Role name that grants standard user access. Defaults to `openshell-user`.
+    #[serde(default = "default_user_role")]
+    pub user_role: String,
 }
 
 const fn default_jwks_ttl_secs() -> u64 {
     3600
+}
+
+fn default_roles_claim() -> String {
+    "realm_access.roles".to_string()
+}
+
+fn default_admin_role() -> String {
+    "openshell-admin".to_string()
+}
+
+fn default_user_role() -> String {
+    "openshell-user".to_string()
 }
 
 impl Config {

@@ -174,7 +174,7 @@ where
 
     fn call(&mut self, req: Request<B>) -> Self::Future {
         let oidc_cache = self.oidc_cache.clone();
-        let _oidc_config = self.oidc_config.clone();
+        let oidc_config = self.oidc_config.clone();
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
@@ -218,7 +218,8 @@ where
             };
 
             // Check RBAC: verify the user has the required role for this method.
-            if let Err(status) = oidc::check_role(&claims, &path) {
+            let oidc_cfg = oidc_config.as_ref().expect("OIDC config must be set when cache is present");
+            if let Err(status) = oidc::check_role(&claims, &path, oidc_cfg) {
                 let response = status.into_http();
                 let (parts, body) = response.into_parts();
                 let body = tonic::body::BoxBody::new(body);
