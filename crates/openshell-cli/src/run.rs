@@ -1230,6 +1230,7 @@ pub async fn gateway_login(name: &str) -> Result<()> {
         Some("cloudflare_jwt") => {
             let token = crate::auth::browser_auth_flow(&metadata.gateway_endpoint).await?;
             openshell_bootstrap::edge_token::store_edge_token(name, &token)?;
+            eprintln!("{} Authenticated to gateway '{name}'", "✓".green().bold());
         }
         Some("oidc") => {
             let issuer = metadata.oidc_issuer.as_deref().ok_or_else(|| {
@@ -1237,13 +1238,22 @@ pub async fn gateway_login(name: &str) -> Result<()> {
             })?;
             let client_id = metadata.oidc_client_id.as_deref().unwrap_or("openshell-cli");
 
-            if std::env::var("OPENSHELL_OIDC_CLIENT_SECRET").is_ok() {
-                let bundle =
-                    crate::oidc_auth::oidc_client_credentials_flow(issuer, client_id).await?;
-                openshell_bootstrap::oidc_token::store_oidc_token(name, &bundle)?;
+            let bundle = if std::env::var("OPENSHELL_OIDC_CLIENT_SECRET").is_ok() {
+                crate::oidc_auth::oidc_client_credentials_flow(issuer, client_id).await?
             } else {
-                let bundle = crate::oidc_auth::oidc_browser_auth_flow(issuer, client_id).await?;
-                openshell_bootstrap::oidc_token::store_oidc_token(name, &bundle)?;
+                crate::oidc_auth::oidc_browser_auth_flow(issuer, client_id).await?
+            };
+
+            let username = jwt_preferred_username(&bundle.access_token);
+            openshell_bootstrap::oidc_token::store_oidc_token(name, &bundle)?;
+
+            if let Some(user) = username {
+                eprintln!(
+                    "{} Authenticated to gateway '{name}' as {user}",
+                    "✓".green().bold(),
+                );
+            } else {
+                eprintln!("{} Authenticated to gateway '{name}'", "✓".green().bold());
             }
         }
         _ => {
@@ -1254,9 +1264,22 @@ pub async fn gateway_login(name: &str) -> Result<()> {
         }
     }
 
-    eprintln!("{} Authenticated to gateway '{name}'", "✓".green().bold(),);
-
     Ok(())
+}
+
+/// Extract `preferred_username` from a JWT payload without signature verification.
+fn jwt_preferred_username(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = base64::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        payload,
+    )
+    .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    claims
+        .get("preferred_username")
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }
 
 /// Clear stored authentication credentials for a gateway.
