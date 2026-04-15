@@ -167,15 +167,47 @@ These gRPC methods bypass OIDC validation:
 | `/grpc.reflection.*` | gRPC server reflection (debugging tools) |
 | `/grpc.health.*` | gRPC health check protocol |
 
+## Role-Based Access Control (RBAC)
+
+After JWT validation, the server checks the user's roles against a per-method requirement. Roles are extracted from a configurable claim path in the JWT.
+
+### Role Mapping
+
+| Operation | Required Role |
+|---|---|
+| Health, sandbox supervisor RPCs | (no auth — skip list) |
+| Sandbox create, list, delete, exec, SSH | user role |
+| Provider list, get | user role |
+| Provider create, update, delete | admin role |
+| Global config/policy updates | admin role |
+| Draft policy approvals/rejections | admin role |
+| All other authenticated RPCs | user role |
+
+### Configurable Roles
+
+The roles claim path and role names are configurable to support different OIDC providers. Each provider stores roles differently in the JWT:
+
+| Provider | Roles Claim | Example Admin Role | Example User Role |
+|---|---|---|---|
+| Keycloak | `realm_access.roles` (default) | `openshell-admin` | `openshell-user` |
+| Microsoft Entra ID | `roles` | `OpenShell.Admin` | `OpenShell.User` |
+| Okta | `groups` | `openshell-admin` | `openshell-user` |
+| GitHub | N/A | (empty — skip RBAC) | (empty — skip RBAC) |
+
+When both `--oidc-admin-role` and `--oidc-user-role` are set to empty strings, RBAC is skipped entirely — any valid JWT is authorized. This supports providers like GitHub that don't emit roles in JWTs (authentication-only mode).
+
 ## Server Configuration
 
 ### CLI Flags / Environment Variables
 
-| Flag | Env Var | Description |
-|---|---|---|
-| `--oidc-issuer` | `OPENSHELL_OIDC_ISSUER` | OIDC issuer URL (enables JWT validation) |
-| `--oidc-audience` | `OPENSHELL_OIDC_AUDIENCE` | Expected `aud` claim (default: `openshell-cli`) |
-| `--oidc-jwks-ttl` | `OPENSHELL_OIDC_JWKS_TTL` | JWKS cache TTL in seconds (default: 3600) |
+| Flag | Env Var | Default | Description |
+|---|---|---|---|
+| `--oidc-issuer` | `OPENSHELL_OIDC_ISSUER` | (none) | OIDC issuer URL (enables JWT validation) |
+| `--oidc-audience` | `OPENSHELL_OIDC_AUDIENCE` | `openshell-cli` | Expected `aud` claim |
+| `--oidc-jwks-ttl` | `OPENSHELL_OIDC_JWKS_TTL` | `3600` | JWKS cache TTL in seconds |
+| `--oidc-roles-claim` | `OPENSHELL_OIDC_ROLES_CLAIM` | `realm_access.roles` | Dot-separated path to roles array in JWT |
+| `--oidc-admin-role` | `OPENSHELL_OIDC_ADMIN_ROLE` | `openshell-admin` | Role name for admin access |
+| `--oidc-user-role` | `OPENSHELL_OIDC_USER_ROLE` | `openshell-user` | Role name for user access |
 
 When `--oidc-issuer` is not set, OIDC validation is disabled and the server falls back to mTLS-only or plaintext behavior.
 
@@ -192,6 +224,61 @@ server:
 ### Discovery Endpoint
 
 The server exposes `GET /auth/oidc-config` which returns the configured OIDC issuer and audience. This allows CLI auto-discovery during `gateway add`.
+
+## Provider Examples
+
+### Keycloak
+
+```bash
+openshell gateway start \
+  --oidc-issuer http://keycloak:8180/realms/openshell
+# Defaults work: realm_access.roles, openshell-admin, openshell-user
+```
+
+### Microsoft Entra ID
+
+Register an app in Azure Portal with app roles `OpenShell.Admin` and `OpenShell.User`, then:
+
+```bash
+openshell gateway start \
+  --oidc-issuer https://login.microsoftonline.com/{tenant-id}/v2.0 \
+  --oidc-audience api://openshell \
+  --oidc-roles-claim roles \
+  --oidc-admin-role OpenShell.Admin \
+  --oidc-user-role OpenShell.User
+```
+
+CLI registration:
+
+```bash
+openshell gateway add https://gateway:8080 \
+  --oidc-issuer https://login.microsoftonline.com/{tenant-id}/v2.0 \
+  --oidc-client-id {client-id}
+```
+
+### Okta
+
+Create an authorization server with a `groups` claim, then:
+
+```bash
+openshell gateway start \
+  --oidc-issuer https://dev-xxxxx.okta.com/oauth2/default \
+  --oidc-roles-claim groups \
+  --oidc-admin-role openshell-admin \
+  --oidc-user-role openshell-user
+```
+
+### GitHub (Authentication Only)
+
+GitHub's OIDC tokens (from Actions) don't carry roles. Use empty role names to skip RBAC — any valid GitHub JWT is authorized:
+
+```bash
+openshell gateway start \
+  --oidc-issuer https://token.actions.githubusercontent.com \
+  --oidc-audience https://github.com/{org} \
+  --oidc-admin-role "" \
+  --oidc-user-role ""
+```
 
 ## CLI Commands
 
@@ -220,9 +307,17 @@ openshell gateway start \
 ```bash
 # Interactive (opens browser)
 openshell gateway login
+# Expected: ✓ Authenticated to gateway 'openshell' as admin@test
 
 # CI / automation
 OPENSHELL_OIDC_CLIENT_SECRET=secret openshell gateway login
+```
+
+### Logout
+
+```bash
+openshell gateway logout
+# Expected: ✓ Logged out of gateway 'openshell'
 ```
 
 ## Keycloak Setup
