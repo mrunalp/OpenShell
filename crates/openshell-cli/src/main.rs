@@ -147,7 +147,7 @@ fn apply_auth(tls: &mut TlsOptions, gateway_name: &str) {
                 // so the async refresh can run within the sync apply_auth call.
                 match tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current()
-                        .block_on(crate::oidc_auth::oidc_refresh_token(&bundle))
+                        .block_on(openshell_cli::oidc_auth::oidc_refresh_token(&bundle))
                 }) {
                     Ok(refreshed) => {
                         let _ =
