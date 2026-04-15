@@ -87,7 +87,13 @@ pub fn check_role(claims: &OidcClaims, path: &str, config: &OidcConfig) -> Resul
         return Ok(());
     }
 
-    if claims.roles.iter().any(|r| r == required) {
+    // Admin role implicitly satisfies user role requirements.
+    let has_role = claims.roles.iter().any(|r| r == required)
+        || (!config.admin_role.is_empty()
+            && required == &config.user_role
+            && claims.roles.iter().any(|r| r == &config.admin_role));
+
+    if has_role {
         Ok(())
     } else {
         debug!(
@@ -104,11 +110,18 @@ pub fn check_role(claims: &OidcClaims, path: &str, config: &OidcConfig) -> Resul
 }
 
 /// Cached JWKS key set fetched from the OIDC issuer.
+///
+/// A `refresh_mutex` ensures that only one refresh runs at a time,
+/// preventing a "thundering herd" when the TTL expires or a new `kid`
+/// is encountered under concurrent load.
 pub struct JwksCache {
     keys: Arc<RwLock<HashMap<String, DecodingKey>>>,
     jwks_uri: String,
     ttl: Duration,
     last_refresh: Arc<RwLock<Instant>>,
+    /// Serializes JWKS refresh operations so concurrent requests coalesce
+    /// into a single HTTP fetch rather than stampeding the OIDC provider.
+    refresh_mutex: tokio::sync::Mutex<()>,
     http: Client,
     config: OidcConfig,
 }
@@ -219,6 +232,7 @@ impl JwksCache {
             last_refresh: Arc::new(RwLock::new(
                 Instant::now() - Duration::from_secs(config.jwks_ttl_secs + 1),
             )),
+            refresh_mutex: tokio::sync::Mutex::new(()),
             http,
             config: config.clone(),
         };
@@ -266,12 +280,28 @@ impl JwksCache {
     }
 
     /// Refresh keys if the TTL has elapsed.
+    ///
+    /// Holds the refresh mutex so concurrent callers coalesce into a single
+    /// HTTP fetch. The second caller will re-check the TTL after acquiring
+    /// the lock and find it fresh.
     async fn refresh_if_stale(&self) -> Result<(), String> {
         let last = *self.last_refresh.read().await;
-        if last.elapsed() > self.ttl {
-            self.refresh_keys().await?;
+        if last.elapsed() <= self.ttl {
+            return Ok(());
         }
-        Ok(())
+        let _guard = self.refresh_mutex.lock().await;
+        // Re-check after acquiring the lock — another task may have refreshed.
+        let last = *self.last_refresh.read().await;
+        if last.elapsed() <= self.ttl {
+            return Ok(());
+        }
+        self.refresh_keys().await
+    }
+
+    /// Refresh keys unconditionally, coalescing concurrent callers.
+    async fn refresh_keys_coalesced(&self) -> Result<(), String> {
+        let _guard = self.refresh_mutex.lock().await;
+        self.refresh_keys().await
     }
 
     /// Validate a JWT and return the extracted claims.
@@ -299,7 +329,7 @@ impl JwksCache {
             None => {
                 // Key not found -- try refreshing once (key rotation).
                 drop(keys);
-                self.refresh_keys().await.map_err(|e| {
+                self.refresh_keys_coalesced().await.map_err(|e| {
                     warn!(error = %e, "JWKS refresh on kid miss failed");
                     Status::internal("OIDC key refresh failed")
                 })?;
@@ -407,6 +437,18 @@ mod tests {
         let config = default_config();
         assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider", &config).is_ok());
         assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes", &config).is_ok());
+    }
+
+    #[test]
+    fn check_role_admin_only_can_access_user_methods() {
+        // Admin role implicitly satisfies user role — an admin user who
+        // only has admin_role (without explicit user_role) should still
+        // be able to call user-level methods.
+        let claims = claims_with_roles(&["openshell-admin"]);
+        let config = default_config();
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes", &config).is_ok());
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateSandbox", &config).is_ok());
+        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider", &config).is_ok());
     }
 
     #[test]

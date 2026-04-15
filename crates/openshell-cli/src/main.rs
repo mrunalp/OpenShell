@@ -126,6 +126,7 @@ fn resolve_gateway_name(gateway_flag: &Option<String>) -> Option<String> {
 ///
 /// Handles both Cloudflare Access (`edge_token`) and OIDC (`oidc_token`)
 /// auth modes by loading the stored token and setting it on `TlsOptions`.
+/// For OIDC, automatically refreshes the token if it's near expiry.
 fn apply_auth(tls: &mut TlsOptions, gateway_name: &str) {
     let Some(meta) = get_gateway_metadata(gateway_name) else {
         return;
@@ -137,7 +138,30 @@ fn apply_auth(tls: &mut TlsOptions, gateway_name: &str) {
             }
         }
         Some("oidc") => {
-            if let Some(bundle) = openshell_bootstrap::oidc_token::load_oidc_token(gateway_name) {
+            let Some(bundle) = openshell_bootstrap::oidc_token::load_oidc_token(gateway_name)
+            else {
+                return;
+            };
+            if openshell_bootstrap::oidc_token::is_token_expired(&bundle) {
+                // Try to refresh the token in-place using block_in_place
+                // so the async refresh can run within the sync apply_auth call.
+                match tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(crate::oidc_auth::oidc_refresh_token(&bundle))
+                }) {
+                    Ok(refreshed) => {
+                        let _ =
+                            openshell_bootstrap::oidc_token::store_oidc_token(gateway_name, &refreshed);
+                        tls.oidc_token = Some(refreshed.access_token);
+                    }
+                    Err(e) => {
+                        tracing::warn!("OIDC token refresh failed: {e}");
+                        // Use the expired token anyway — server will reject it
+                        // with a clear error prompting re-login.
+                        tls.oidc_token = Some(bundle.access_token);
+                    }
+                }
+            } else {
                 tls.oidc_token = Some(bundle.access_token);
             }
         }
