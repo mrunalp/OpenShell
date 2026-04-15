@@ -25,7 +25,7 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tower::ServiceExt;
 
-use crate::{OpenShellService, ServerState, http_router, inference::InferenceService, oidc};
+use crate::{OpenShellService, ServerState, authz::AuthzPolicy, http_router, inference::InferenceService, oidc};
 
 /// Maximum inbound gRPC message size (1 MB).
 ///
@@ -57,10 +57,14 @@ impl MultiplexService {
             .max_decoding_message_size(MAX_GRPC_DECODE_SIZE);
         let inference = InferenceServer::new(InferenceService::new(self.state.clone()))
             .max_decoding_message_size(MAX_GRPC_DECODE_SIZE);
-        let grpc_service = OidcGrpcRouter::new(
+        let authz_policy = self.state.config.oidc.as_ref().map(|oidc| AuthzPolicy {
+            admin_role: oidc.admin_role.clone(),
+            user_role: oidc.user_role.clone(),
+        });
+        let grpc_service = AuthGrpcRouter::new(
             GrpcRouter::new(openshell, inference),
             self.state.oidc_cache.clone(),
-            self.state.config.oidc.clone(),
+            authz_policy,
         );
         let http_service = http_router(self.state.clone());
 
@@ -127,34 +131,37 @@ where
     }
 }
 
-/// gRPC router wrapper that validates OIDC Bearer tokens when configured.
+/// gRPC router wrapper that authenticates and authorizes requests.
 ///
 /// When `oidc_cache` is `Some`, extracts the `authorization: Bearer <token>`
-/// header from incoming requests and validates the JWT before forwarding to
-/// the inner gRPC router. Requests to methods on the skip list (health checks,
-/// sandbox-to-server RPCs) bypass validation.
+/// header, validates the JWT (authentication), then checks RBAC roles
+/// (authorization) before forwarding to the inner gRPC router.
+///
+/// Authentication is provider-specific (currently OIDC via `oidc.rs`).
+/// Authorization is provider-agnostic (via `authz.rs`). This separation
+/// aligns with RFC 0001's control-plane identity design.
 #[derive(Clone)]
-pub struct OidcGrpcRouter<S> {
+pub struct AuthGrpcRouter<S> {
     inner: S,
     oidc_cache: Option<Arc<oidc::JwksCache>>,
-    oidc_config: Option<openshell_core::OidcConfig>,
+    authz_policy: Option<AuthzPolicy>,
 }
 
-impl<S> OidcGrpcRouter<S> {
+impl<S> AuthGrpcRouter<S> {
     fn new(
         inner: S,
         oidc_cache: Option<Arc<oidc::JwksCache>>,
-        oidc_config: Option<openshell_core::OidcConfig>,
+        authz_policy: Option<AuthzPolicy>,
     ) -> Self {
         Self {
             inner,
             oidc_cache,
-            oidc_config,
+            authz_policy,
         }
     }
 }
 
-impl<S, B> tower::Service<Request<B>> for OidcGrpcRouter<S>
+impl<S, B> tower::Service<Request<B>> for AuthGrpcRouter<S>
 where
     S: tower::Service<Request<B>, Response = Response<tonic::body::BoxBody>>
         + Clone
@@ -174,7 +181,7 @@ where
 
     fn call(&mut self, req: Request<B>) -> Self::Future {
         let oidc_cache = self.oidc_cache.clone();
-        let oidc_config = self.oidc_config.clone();
+        let authz_policy = self.authz_policy.clone();
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
@@ -206,9 +213,9 @@ where
                 return Ok(Response::from_parts(parts, body));
             };
 
-            // Validate the JWT.
-            let claims = match cache.validate_token(token).await {
-                Ok(claims) => claims,
+            // Authenticate: validate the JWT and produce an Identity.
+            let identity = match cache.validate_token(token).await {
+                Ok(id) => id,
                 Err(status) => {
                     let response = status.into_http();
                     let (parts, body) = response.into_parts();
@@ -217,13 +224,14 @@ where
                 }
             };
 
-            // Check RBAC: verify the user has the required role for this method.
-            let oidc_cfg = oidc_config.as_ref().expect("OIDC config must be set when cache is present");
-            if let Err(status) = oidc::check_role(&claims, &path, oidc_cfg) {
-                let response = status.into_http();
-                let (parts, body) = response.into_parts();
-                let body = tonic::body::BoxBody::new(body);
-                return Ok(Response::from_parts(parts, body));
+            // Authorize: check RBAC roles against the method.
+            if let Some(ref policy) = authz_policy {
+                if let Err(status) = policy.check(&identity, &path) {
+                    let response = status.into_http();
+                    let (parts, body) = response.into_parts();
+                    let body = tonic::body::BoxBody::new(body);
+                    return Ok(Response::from_parts(parts, body));
+                }
             }
 
             inner.ready().await?.call(req).await

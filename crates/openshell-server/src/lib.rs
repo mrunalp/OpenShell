@@ -22,8 +22,10 @@
 mod auth;
 pub mod cli;
 mod compute;
+mod authz;
 mod grpc;
 mod http;
+pub mod identity;
 mod inference;
 mod multiplex;
 pub mod oidc;

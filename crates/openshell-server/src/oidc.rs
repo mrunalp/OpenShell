@@ -1,13 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! OIDC JWT validation for gRPC requests.
+//! OIDC JWT authentication provider.
 //!
 //! Validates `authorization: Bearer <JWT>` headers against a Keycloak (or
-//! any OIDC-compliant) issuer using cached JWKS keys. When the server is
-//! started with `--oidc-issuer`, all gRPC requests (except those on the
-//! skip list) must carry a valid Bearer token.
+//! any OIDC-compliant) issuer using cached JWKS keys. Produces an
+//! `Identity` that the authorization layer (`authz.rs`) evaluates.
+//!
+//! This module owns authentication (verifying who the caller is).
+//! Authorization (deciding what the caller can do) is in `authz.rs`.
 
+use crate::identity::{Identity, IdentityProvider};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use openshell_core::OidcConfig;
 use reqwest::Client;
@@ -45,68 +48,6 @@ const SKIP_PREFIXES: &[&str] = &[
 pub fn is_skip_method(path: &str) -> bool {
     SKIP_METHODS.contains(&path)
         || SKIP_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
-}
-
-/// gRPC methods that require the `openshell-admin` role.
-/// All other authenticated methods require `openshell-user`.
-const ADMIN_METHODS: &[&str] = &[
-    // Provider management
-    "/openshell.v1.OpenShell/CreateProvider",
-    "/openshell.v1.OpenShell/UpdateProvider",
-    "/openshell.v1.OpenShell/DeleteProvider",
-    // Global config and policy
-    "/openshell.v1.OpenShell/UpdateConfig",
-    // Draft policy approvals
-    "/openshell.v1.OpenShell/ApproveDraftChunk",
-    "/openshell.v1.OpenShell/ApproveAllDraftChunks",
-    "/openshell.v1.OpenShell/RejectDraftChunk",
-    "/openshell.v1.OpenShell/EditDraftChunk",
-    "/openshell.v1.OpenShell/UndoDraftChunk",
-    "/openshell.v1.OpenShell/ClearDraftChunks",
-];
-
-/// Returns `true` if the method requires the admin role.
-pub fn is_admin_method(path: &str) -> bool {
-    ADMIN_METHODS.contains(&path)
-}
-
-/// Check that the validated claims include the required role for the method.
-///
-/// Uses the configured role names from `OidcConfig` so different OIDC
-/// providers (Keycloak, Entra ID, Okta) can use their own role naming.
-pub fn check_role(claims: &OidcClaims, path: &str, config: &OidcConfig) -> Result<(), Status> {
-    let required = if is_admin_method(path) {
-        &config.admin_role
-    } else {
-        &config.user_role
-    };
-
-    // If the required role is empty, skip RBAC (authentication-only mode).
-    // This supports providers like GitHub that don't emit roles in JWTs.
-    if required.is_empty() {
-        return Ok(());
-    }
-
-    // Admin role implicitly satisfies user role requirements.
-    let has_role = claims.roles.iter().any(|r| r == required)
-        || (!config.admin_role.is_empty()
-            && required == &config.user_role
-            && claims.roles.iter().any(|r| r == &config.admin_role));
-
-    if has_role {
-        Ok(())
-    } else {
-        debug!(
-            sub = %claims.sub,
-            required_role = required,
-            user_roles = ?claims.roles,
-            method = path,
-            "OIDC role check failed"
-        );
-        Err(Status::permission_denied(format!(
-            "role '{required}' required"
-        )))
-    }
 }
 
 /// Cached JWKS key set fetched from the OIDC issuer.
@@ -304,8 +245,11 @@ impl JwksCache {
         self.refresh_keys().await
     }
 
-    /// Validate a JWT and return the extracted claims.
-    pub async fn validate_token(&self, token: &str) -> Result<OidcClaims, Status> {
+    /// Validate a JWT and return an `Identity`.
+    ///
+    /// This is the authentication step — it verifies the caller's identity
+    /// but does not check authorization (that's `authz::AuthzPolicy::check`).
+    pub async fn validate_token(&self, token: &str) -> Result<Identity, Status> {
         self.refresh_if_stale().await.map_err(|e| {
             warn!(error = %e, "JWKS refresh failed");
             Status::internal("OIDC key refresh failed")
@@ -353,7 +297,13 @@ impl JwksCache {
 
         let mut claims = token_data.claims;
         claims.extract_roles(&self.config.roles_claim);
-        Ok(claims)
+
+        Ok(Identity {
+            subject: claims.sub,
+            display_name: claims.preferred_username,
+            roles: claims.roles,
+            provider: IdentityProvider::Oidc,
+        })
     }
 }
 
@@ -385,103 +335,6 @@ mod tests {
     #[test]
     fn skip_list_allows_grpc_health() {
         assert!(is_skip_method("/grpc.health.v1.Health/Check"));
-    }
-
-    #[test]
-    fn admin_methods_detected() {
-        assert!(is_admin_method("/openshell.v1.OpenShell/CreateProvider"));
-        assert!(is_admin_method("/openshell.v1.OpenShell/UpdateConfig"));
-        assert!(is_admin_method("/openshell.v1.OpenShell/ApproveDraftChunk"));
-        assert!(!is_admin_method("/openshell.v1.OpenShell/CreateSandbox"));
-        assert!(!is_admin_method("/openshell.v1.OpenShell/ListSandboxes"));
-    }
-
-    fn default_config() -> OidcConfig {
-        OidcConfig {
-            issuer: "http://localhost".to_string(),
-            audience: "test".to_string(),
-            jwks_ttl_secs: 3600,
-            roles_claim: "realm_access.roles".to_string(),
-            admin_role: "openshell-admin".to_string(),
-            user_role: "openshell-user".to_string(),
-        }
-    }
-
-    fn claims_with_roles(roles: &[&str]) -> OidcClaims {
-        OidcClaims {
-            sub: "test-user".to_string(),
-            preferred_username: None,
-            email: None,
-            roles: roles.iter().map(|r| (*r).to_string()).collect(),
-            extra: serde_json::Value::Null,
-        }
-    }
-
-    #[test]
-    fn check_role_accepts_matching_role() {
-        let claims = claims_with_roles(&["openshell-user"]);
-        let config = default_config();
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes", &config).is_ok());
-    }
-
-    #[test]
-    fn check_role_rejects_missing_role() {
-        let claims = claims_with_roles(&["openshell-user"]);
-        let config = default_config();
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider", &config).is_err());
-    }
-
-    #[test]
-    fn check_role_admin_has_admin_access() {
-        let claims = claims_with_roles(&["openshell-admin", "openshell-user"]);
-        let config = default_config();
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider", &config).is_ok());
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes", &config).is_ok());
-    }
-
-    #[test]
-    fn check_role_admin_only_can_access_user_methods() {
-        // Admin role implicitly satisfies user role — an admin user who
-        // only has admin_role (without explicit user_role) should still
-        // be able to call user-level methods.
-        let claims = claims_with_roles(&["openshell-admin"]);
-        let config = default_config();
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes", &config).is_ok());
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateSandbox", &config).is_ok());
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider", &config).is_ok());
-    }
-
-    #[test]
-    fn check_role_rejects_empty_roles() {
-        let claims = claims_with_roles(&[]);
-        let config = default_config();
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes", &config).is_err());
-    }
-
-    #[test]
-    fn check_role_skips_when_role_name_empty() {
-        // Simulates providers like GitHub that don't emit roles.
-        let claims = claims_with_roles(&[]);
-        let config = OidcConfig {
-            user_role: String::new(),
-            admin_role: String::new(),
-            ..default_config()
-        };
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes", &config).is_ok());
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider", &config).is_ok());
-    }
-
-    #[test]
-    fn check_role_custom_role_names() {
-        // Simulates Entra ID with custom role names.
-        let claims = claims_with_roles(&["OpenShell.Admin", "OpenShell.User"]);
-        let config = OidcConfig {
-            admin_role: "OpenShell.Admin".to_string(),
-            user_role: "OpenShell.User".to_string(),
-            ..default_config()
-        };
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/CreateProvider", &config).is_ok());
-        assert!(check_role(&claims, "/openshell.v1.OpenShell/ListSandboxes", &config).is_ok());
     }
 
     #[test]
