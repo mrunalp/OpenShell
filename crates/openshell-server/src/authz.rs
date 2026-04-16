@@ -34,12 +34,38 @@ const ADMIN_METHODS: &[&str] = &[
 ];
 
 /// Authorization policy configuration.
+///
+/// Supports two modes:
+/// - **RBAC mode**: both `admin_role` and `user_role` are non-empty.
+/// - **Authentication-only mode**: both are empty (any valid token is authorized).
+///
+/// Partial configuration (one empty, one set) is rejected at construction
+/// to prevent accidentally leaving admin endpoints unprotected.
 #[derive(Debug, Clone)]
 pub struct AuthzPolicy {
     /// Role name that grants admin access. Empty disables admin checks.
     pub admin_role: String,
     /// Role name that grants standard user access. Empty disables user checks.
     pub user_role: String,
+}
+
+impl AuthzPolicy {
+    /// Validate the policy configuration.
+    ///
+    /// Returns an error if only one of admin/user role is set — either
+    /// both must be set (RBAC mode) or both empty (auth-only mode).
+    pub fn validate(&self) -> Result<(), String> {
+        let admin_set = !self.admin_role.is_empty();
+        let user_set = !self.user_role.is_empty();
+        if admin_set != user_set {
+            return Err(format!(
+                "OIDC RBAC misconfiguration: admin_role={:?}, user_role={:?}. \
+                 Either set both roles (RBAC mode) or leave both empty (authentication-only mode).",
+                self.admin_role, self.user_role,
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl AuthzPolicy {
@@ -159,5 +185,38 @@ mod tests {
         };
         assert!(policy.check(&id, "/openshell.v1.OpenShell/CreateProvider").is_ok());
         assert!(policy.check(&id, "/openshell.v1.OpenShell/ListSandboxes").is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_both_roles_set() {
+        let policy = default_policy();
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_both_roles_empty() {
+        let policy = AuthzPolicy {
+            admin_role: String::new(),
+            user_role: String::new(),
+        };
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_partial_empty_admin_only() {
+        let policy = AuthzPolicy {
+            admin_role: "admin".to_string(),
+            user_role: String::new(),
+        };
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_partial_empty_user_only() {
+        let policy = AuthzPolicy {
+            admin_role: String::new(),
+            user_role: "user".to_string(),
+        };
+        assert!(policy.validate().is_err());
     }
 }

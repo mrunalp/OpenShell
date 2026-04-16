@@ -79,6 +79,7 @@ impl std::fmt::Debug for JwksCache {
 /// OIDC discovery document (subset of fields we need).
 #[derive(Deserialize)]
 struct OidcDiscovery {
+    issuer: String,
     jwks_uri: String,
 }
 
@@ -163,6 +164,15 @@ impl JwksCache {
             .json()
             .await
             .map_err(|e| format!("OIDC discovery response parse failed: {e}"))?;
+
+        // Validate the discovery document's issuer matches our configured issuer.
+        let expected = config.issuer.trim_end_matches('/');
+        let actual = discovery.issuer.trim_end_matches('/');
+        if expected != actual {
+            return Err(format!(
+                "OIDC discovery issuer mismatch: expected '{expected}', got '{actual}'"
+            ));
+        }
 
         info!(jwks_uri = %discovery.jwks_uri, "OIDC JWKS URI discovered");
 

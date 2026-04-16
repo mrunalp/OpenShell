@@ -152,6 +152,15 @@ pub async fn run_server(
     let store = Arc::new(Store::connect(database_url).await?);
 
     let oidc_cache = if let Some(ref oidc) = config.oidc {
+        // Validate RBAC configuration before starting.
+        let policy = authz::AuthzPolicy {
+            admin_role: oidc.admin_role.clone(),
+            user_role: oidc.user_role.clone(),
+        };
+        policy
+            .validate()
+            .map_err(|e| Error::config(e))?;
+
         let cache = oidc::JwksCache::new(oidc)
             .await
             .map_err(|e| Error::config(format!("OIDC initialization failed: {e}")))?;

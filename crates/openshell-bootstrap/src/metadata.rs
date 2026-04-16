@@ -51,9 +51,15 @@ pub struct GatewayMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc_issuer: Option<String>,
 
-    /// OIDC client ID (set when `auth_mode == "oidc"`).
+    /// OIDC client ID for the CLI login flow (set when `auth_mode == "oidc"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc_client_id: Option<String>,
+
+    /// OIDC audience for the resource server (API). When different from
+    /// client_id, the CLI requests this audience in the token exchange.
+    /// When `None`, defaults to the client_id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc_audience: Option<String>,
 }
 
 impl GatewayMetadata {
@@ -142,10 +148,7 @@ pub fn create_gateway_metadata_with_host(
         remote_host,
         resolved_host,
         auth_mode: disable_tls.then(|| "plaintext".to_string()),
-        edge_team_domain: None,
-        edge_auth_url: None,
-        oidc_issuer: None,
-        oidc_client_id: None,
+        ..Default::default()
     }
 }
 

@@ -31,6 +31,7 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(120);
 /// OIDC discovery document (subset of fields we need).
 #[derive(Debug, Deserialize)]
 struct OidcDiscovery {
+    issuer: String,
     authorization_endpoint: String,
     token_endpoint: String,
 }
@@ -46,17 +47,27 @@ struct TokenResponse {
 }
 
 /// Discover OIDC endpoints from the issuer's well-known configuration.
+///
+/// Validates that the discovery document's `issuer` field matches the
+/// configured issuer URL to prevent SSRF or misdirection.
 async fn discover(issuer: &str) -> Result<OidcDiscovery> {
-    let url = format!(
-        "{}/.well-known/openid-configuration",
-        issuer.trim_end_matches('/')
-    );
+    let normalized_issuer = issuer.trim_end_matches('/');
+    let url = format!("{normalized_issuer}/.well-known/openid-configuration");
     let resp: OidcDiscovery = reqwest::get(&url)
         .await
         .into_diagnostic()?
         .json()
         .await
         .into_diagnostic()?;
+
+    let discovered_issuer = resp.issuer.trim_end_matches('/');
+    if discovered_issuer != normalized_issuer {
+        return Err(miette::miette!(
+            "OIDC discovery issuer mismatch: expected '{}', got '{}'",
+            normalized_issuer,
+            discovered_issuer
+        ));
+    }
     Ok(resp)
 }
 
@@ -80,8 +91,21 @@ fn generate_state() -> String {
     hex::encode(buf)
 }
 
-/// Fill a buffer with random bytes using std hash-based entropy.
+/// Fill a buffer with OS-backed random bytes.
+///
+/// Uses `/dev/urandom` on Unix and the platform RNG on other systems via
+/// `std::collections::hash_map::RandomState` as a fallback.
 fn getrandom(buf: &mut [u8]) {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            if f.read_exact(buf).is_ok() {
+                return;
+            }
+        }
+    }
+    // Fallback: hash-based entropy (still seeded from OS on modern platforms).
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
     for chunk in buf.chunks_mut(8) {
@@ -182,7 +206,6 @@ pub async fn oidc_client_credentials_flow(
         ("grant_type", "client_credentials"),
         ("client_id", client_id),
         ("client_secret", &client_secret),
-        ("scope", "openid"),
     ];
 
     let client = reqwest::Client::new();
@@ -200,6 +223,9 @@ pub async fn oidc_client_credentials_flow(
 }
 
 /// Refresh an OIDC token using the refresh_token grant.
+///
+/// Preserves the existing refresh token if the server does not return a new
+/// one (per OAuth 2.0 spec, the refresh response may omit `refresh_token`).
 pub async fn oidc_refresh_token(bundle: &OidcTokenBundle) -> Result<OidcTokenBundle> {
     let refresh_token = bundle.refresh_token.as_deref().ok_or_else(|| {
         miette::miette!("no refresh token available — re-authenticate with: openshell gateway login")
@@ -224,7 +250,12 @@ pub async fn oidc_refresh_token(bundle: &OidcTokenBundle) -> Result<OidcTokenBun
         .await
         .into_diagnostic()?;
 
-    Ok(bundle_from_response(resp, &bundle.issuer, &bundle.client_id))
+    let mut refreshed = bundle_from_response(resp, &bundle.issuer, &bundle.client_id);
+    // Preserve the old refresh token if the server didn't return a new one.
+    if refreshed.refresh_token.is_none() {
+        refreshed.refresh_token = bundle.refresh_token.clone();
+    }
+    Ok(refreshed)
 }
 
 /// Ensure we have a valid OIDC token for the given gateway, refreshing if needed.
@@ -312,6 +343,28 @@ fn urlencoded(s: &str) -> String {
     out
 }
 
+/// Percent-decode a URL query parameter value.
+fn percent_decode(s: &str) -> String {
+    let mut out = Vec::with_capacity(s.len());
+    let mut bytes = s.bytes();
+    while let Some(b) = bytes.next() {
+        if b == b'%' {
+            let hi = bytes.next().and_then(|b| char::from(b).to_digit(16));
+            let lo = bytes.next().and_then(|b| char::from(b).to_digit(16));
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+            } else {
+                out.push(b'%');
+            }
+        } else if b == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(b);
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
 /// Callback server state.
 struct CallbackState {
     expected_state: String,
@@ -379,8 +432,8 @@ async fn handle_oidc_callback(
         .split('&')
         .filter_map(|pair| {
             let mut parts = pair.splitn(2, '=');
-            let key = parts.next()?.to_string();
-            let value = parts.next().unwrap_or("").to_string();
+            let key = percent_decode(parts.next()?);
+            let value = percent_decode(parts.next().unwrap_or(""));
             Some((key, value))
         })
         .collect();

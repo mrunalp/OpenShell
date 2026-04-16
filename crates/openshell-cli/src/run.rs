@@ -1054,6 +1054,7 @@ pub async fn gateway_add(
             auth_mode: Some("oidc".to_string()),
             oidc_issuer: Some(issuer.to_string()),
             oidc_client_id: Some(oidc_client_id.to_string()),
+            oidc_audience: None,
             ..Default::default()
         };
 

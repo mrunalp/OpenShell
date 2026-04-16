@@ -591,7 +591,8 @@ where
         if oidc_issuer.is_some() {
             metadata.auth_mode = Some("oidc".to_string());
             metadata.oidc_issuer = oidc_issuer.clone();
-            metadata.oidc_client_id = Some(oidc_audience.clone());
+            metadata.oidc_client_id = Some("openshell-cli".to_string());
+            metadata.oidc_audience = Some(oidc_audience.clone());
         }
         store_gateway_metadata(&name, &metadata)?;
 
