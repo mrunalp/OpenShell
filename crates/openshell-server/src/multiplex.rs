@@ -65,6 +65,7 @@ impl MultiplexService {
             GrpcRouter::new(openshell, inference),
             self.state.oidc_cache.clone(),
             authz_policy,
+            self.state.config.ssh_handshake_secret.clone(),
         );
         let http_service = http_router(self.state.clone());
 
@@ -145,6 +146,8 @@ pub struct AuthGrpcRouter<S> {
     inner: S,
     oidc_cache: Option<Arc<oidc::JwksCache>>,
     authz_policy: Option<AuthzPolicy>,
+    /// SSH handshake secret used to validate sandbox-to-server RPCs.
+    sandbox_secret: String,
 }
 
 impl<S> AuthGrpcRouter<S> {
@@ -152,11 +155,13 @@ impl<S> AuthGrpcRouter<S> {
         inner: S,
         oidc_cache: Option<Arc<oidc::JwksCache>>,
         authz_policy: Option<AuthzPolicy>,
+        sandbox_secret: String,
     ) -> Self {
         Self {
             inner,
             oidc_cache,
             authz_policy,
+            sandbox_secret,
         }
     }
 }
@@ -182,6 +187,7 @@ where
     fn call(&mut self, req: Request<B>) -> Self::Future {
         let oidc_cache = self.oidc_cache.clone();
         let authz_policy = self.authz_policy.clone();
+        let sandbox_secret = self.sandbox_secret.clone();
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
@@ -192,8 +198,20 @@ where
 
             let path = req.uri().path().to_string();
 
-            // Skip OIDC validation for health and sandbox-to-server RPCs.
-            if oidc::is_skip_method(&path) {
+            // Health probes and reflection — truly unauthenticated.
+            if oidc::is_unauthenticated_method(&path) {
+                return inner.ready().await?.call(req).await;
+            }
+
+            // Sandbox-to-server RPCs — authenticated via shared secret,
+            // not OIDC Bearer tokens.
+            if oidc::is_sandbox_secret_method(&path) {
+                if let Err(status) = oidc::validate_sandbox_secret(req.headers(), &sandbox_secret) {
+                    let response = status.into_http();
+                    let (parts, body) = response.into_parts();
+                    let body = tonic::body::BoxBody::new(body);
+                    return Ok(Response::from_parts(parts, body));
+                }
                 return inner.ready().await?.call(req).await;
             }
 

@@ -22,14 +22,22 @@ use tokio::sync::RwLock;
 use tonic::Status;
 use tracing::{debug, info, warn};
 
-/// gRPC method paths that bypass OIDC validation.
-///
-/// These are either health probes or sandbox-to-server RPCs that authenticate
-/// via mTLS / SSH handshake secret instead of OIDC tokens.
-/// Exact gRPC method paths that bypass OIDC validation.
-const SKIP_METHODS: &[&str] = &[
+/// Truly unauthenticated methods — health probes and infrastructure.
+const UNAUTHENTICATED_METHODS: &[&str] = &[
     "/openshell.v1.OpenShell/Health",
     "/openshell.inference.v1.Inference/Health",
+];
+
+/// Path prefixes that bypass OIDC validation (gRPC reflection, health probes).
+const UNAUTHENTICATED_PREFIXES: &[&str] = &[
+    "/grpc.reflection.",
+    "/grpc.health.",
+];
+
+/// Sandbox-to-server RPCs that use the shared sandbox secret instead of
+/// OIDC Bearer tokens. These require the `x-sandbox-secret` metadata header
+/// matching the server's SSH handshake secret.
+const SANDBOX_SECRET_METHODS: &[&str] = &[
     "/openshell.v1.OpenShell/GetSandboxConfig",
     "/openshell.v1.OpenShell/ReportPolicyStatus",
     "/openshell.v1.OpenShell/PushSandboxLogs",
@@ -38,16 +46,35 @@ const SKIP_METHODS: &[&str] = &[
     "/openshell.sandbox.v1.SandboxService/GetSandboxConfig",
 ];
 
-/// Path prefixes that bypass OIDC validation (gRPC reflection, health probes).
-const SKIP_PREFIXES: &[&str] = &[
-    "/grpc.reflection.",
-    "/grpc.health.",
-];
+/// Returns `true` if the method needs no authentication at all.
+pub fn is_unauthenticated_method(path: &str) -> bool {
+    UNAUTHENTICATED_METHODS.contains(&path)
+        || UNAUTHENTICATED_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
+}
 
-/// Returns `true` if the given gRPC path should skip OIDC validation.
-pub fn is_skip_method(path: &str) -> bool {
-    SKIP_METHODS.contains(&path)
-        || SKIP_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
+/// Returns `true` if the method authenticates via the sandbox shared secret
+/// rather than an OIDC Bearer token.
+pub fn is_sandbox_secret_method(path: &str) -> bool {
+    SANDBOX_SECRET_METHODS.contains(&path)
+}
+
+/// Validate the `x-sandbox-secret` header against the server's handshake secret.
+pub fn validate_sandbox_secret(
+    headers: &http::HeaderMap,
+    expected_secret: &str,
+) -> Result<(), Status> {
+    let provided = headers
+        .get("x-sandbox-secret")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            Status::unauthenticated("sandbox secret required for this method")
+        })?;
+
+    if provided != expected_secret {
+        return Err(Status::unauthenticated("invalid sandbox secret"));
+    }
+
+    Ok(())
 }
 
 /// Cached JWKS key set fetched from the OIDC issuer.
@@ -322,29 +349,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skip_list_contains_health() {
-        assert!(is_skip_method("/openshell.v1.OpenShell/Health"));
+    fn health_is_unauthenticated() {
+        assert!(is_unauthenticated_method("/openshell.v1.OpenShell/Health"));
     }
 
     #[test]
-    fn skip_list_rejects_sandbox_operations() {
-        assert!(!is_skip_method("/openshell.v1.OpenShell/CreateSandbox"));
-        assert!(!is_skip_method("/openshell.v1.OpenShell/ListSandboxes"));
+    fn sandbox_operations_require_auth() {
+        assert!(!is_unauthenticated_method("/openshell.v1.OpenShell/CreateSandbox"));
+        assert!(!is_sandbox_secret_method("/openshell.v1.OpenShell/CreateSandbox"));
     }
 
     #[test]
-    fn skip_list_allows_grpc_reflection() {
-        assert!(is_skip_method(
+    fn reflection_is_unauthenticated() {
+        assert!(is_unauthenticated_method(
             "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo"
         ));
-        assert!(is_skip_method(
+        assert!(is_unauthenticated_method(
             "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
         ));
     }
 
     #[test]
-    fn skip_list_allows_grpc_health() {
-        assert!(is_skip_method("/grpc.health.v1.Health/Check"));
+    fn grpc_health_is_unauthenticated() {
+        assert!(is_unauthenticated_method("/grpc.health.v1.Health/Check"));
+    }
+
+    #[test]
+    fn sandbox_rpcs_use_sandbox_secret() {
+        assert!(is_sandbox_secret_method("/openshell.v1.OpenShell/GetSandboxConfig"));
+        assert!(is_sandbox_secret_method("/openshell.v1.OpenShell/GetSandboxProviderEnvironment"));
+        assert!(is_sandbox_secret_method("/openshell.v1.OpenShell/ReportPolicyStatus"));
+        assert!(is_sandbox_secret_method("/openshell.v1.OpenShell/PushSandboxLogs"));
+        assert!(is_sandbox_secret_method("/openshell.v1.OpenShell/SubmitPolicyAnalysis"));
+    }
+
+    #[test]
+    fn sandbox_secret_validation() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-sandbox-secret", "test-secret".parse().unwrap());
+        assert!(validate_sandbox_secret(&headers, "test-secret").is_ok());
+        assert!(validate_sandbox_secret(&headers, "wrong-secret").is_err());
+    }
+
+    #[test]
+    fn sandbox_secret_missing_header() {
+        let headers = http::HeaderMap::new();
+        assert!(validate_sandbox_secret(&headers, "test-secret").is_err());
     }
 
     #[test]

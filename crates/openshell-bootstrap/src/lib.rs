@@ -128,6 +128,12 @@ pub struct DeployOptions {
     pub oidc_issuer: Option<String>,
     /// OIDC audience (client ID). Defaults to "openshell-cli".
     pub oidc_audience: String,
+    /// OIDC roles claim path (e.g. "realm_access.roles").
+    pub oidc_roles_claim: Option<String>,
+    /// OIDC admin role name.
+    pub oidc_admin_role: Option<String>,
+    /// OIDC user role name.
+    pub oidc_user_role: Option<String>,
 }
 
 impl DeployOptions {
@@ -146,6 +152,9 @@ impl DeployOptions {
             recreate: false,
             oidc_issuer: None,
             oidc_audience: "openshell-cli".to_string(),
+            oidc_roles_claim: None,
+            oidc_admin_role: None,
+            oidc_user_role: None,
         }
     }
 
@@ -295,6 +304,9 @@ where
     let recreate = options.recreate;
     let oidc_issuer = options.oidc_issuer;
     let oidc_audience = options.oidc_audience;
+    let oidc_roles_claim = options.oidc_roles_claim;
+    let oidc_admin_role = options.oidc_admin_role;
+    let oidc_user_role = options.oidc_user_role;
 
     // Wrap on_log in Arc<Mutex<>> so we can share it with pull_remote_image
     // which needs a 'static callback for the bollard streaming pull.
@@ -483,6 +495,9 @@ where
             resume,
             oidc_issuer.as_deref(),
             &oidc_audience,
+            oidc_roles_claim.as_deref(),
+            oidc_admin_role.as_deref(),
+            oidc_user_role.as_deref(),
         )
         .await?;
         let port = actual_port;

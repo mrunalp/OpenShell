@@ -943,9 +943,15 @@ enum GatewayCommands {
         #[arg(long, conflicts_with_all = ["remote", "local"])]
         oidc_issuer: Option<String>,
 
-        /// OIDC client ID (defaults to "openshell-cli").
+        /// OIDC client ID for the CLI login flow (defaults to "openshell-cli").
         #[arg(long, default_value = "openshell-cli", requires = "oidc_issuer")]
         oidc_client_id: String,
+
+        /// OIDC audience for the API resource server. When different from
+        /// the client ID, the CLI requests this audience in the token exchange.
+        /// Defaults to the client ID value.
+        #[arg(long, requires = "oidc_issuer")]
+        oidc_audience: Option<String>,
     },
 
     /// Authenticate with an edge-authenticated or OIDC gateway.
@@ -1769,6 +1775,7 @@ async fn main() -> Result<()> {
                 local,
                 oidc_issuer,
                 oidc_client_id,
+                oidc_audience,
             } => {
                 run::gateway_add(
                     &endpoint,
@@ -1778,6 +1785,7 @@ async fn main() -> Result<()> {
                     local,
                     oidc_issuer.as_deref(),
                     &oidc_client_id,
+                    oidc_audience.as_deref(),
                 )
                 .await?;
             }

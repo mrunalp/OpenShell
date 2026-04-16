@@ -74,7 +74,7 @@ async fn discover(issuer: &str) -> Result<OidcDiscovery> {
 /// Generate a random PKCE code verifier (43-128 unreserved chars).
 fn generate_code_verifier() -> String {
     let mut buf = [0u8; 32];
-    getrandom(&mut buf);
+    csprng_fill(&mut buf);
     URL_SAFE_NO_PAD.encode(buf)
 }
 
@@ -87,36 +87,13 @@ fn compute_code_challenge(verifier: &str) -> String {
 /// Generate a random state parameter.
 fn generate_state() -> String {
     let mut buf = [0u8; 16];
-    getrandom(&mut buf);
+    csprng_fill(&mut buf);
     hex::encode(buf)
 }
 
-/// Fill a buffer with OS-backed random bytes.
-///
-/// Uses `/dev/urandom` on Unix and the platform RNG on other systems via
-/// `std::collections::hash_map::RandomState` as a fallback.
-fn getrandom(buf: &mut [u8]) {
-    #[cfg(unix)]
-    {
-        use std::io::Read;
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            if f.read_exact(buf).is_ok() {
-                return;
-            }
-        }
-    }
-    // Fallback: hash-based entropy (still seeded from OS on modern platforms).
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    for chunk in buf.chunks_mut(8) {
-        let state = RandomState::new();
-        let mut hasher = state.build_hasher();
-        hasher.write_usize(chunk.len());
-        let hash = hasher.finish().to_ne_bytes();
-        for (dst, src) in chunk.iter_mut().zip(hash.iter()) {
-            *dst = *src;
-        }
-    }
+/// Fill a buffer with cryptographically secure random bytes from the OS.
+fn csprng_fill(buf: &mut [u8]) {
+    getrandom::fill(buf).expect("OS RNG failed");
 }
 
 /// Run the OIDC Authorization Code + PKCE browser flow.

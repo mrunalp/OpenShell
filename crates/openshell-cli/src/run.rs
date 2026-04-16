@@ -963,6 +963,7 @@ pub async fn gateway_add(
     local: bool,
     oidc_issuer: Option<&str>,
     oidc_client_id: &str,
+    oidc_audience: Option<&str>,
 ) -> Result<()> {
     // If the endpoint starts with ssh://, parse it into an SSH destination
     // and a gateway endpoint automatically.  The host is resolved via
@@ -1054,7 +1055,7 @@ pub async fn gateway_add(
             auth_mode: Some("oidc".to_string()),
             oidc_issuer: Some(issuer.to_string()),
             oidc_client_id: Some(oidc_client_id.to_string()),
-            oidc_audience: None,
+            oidc_audience: oidc_audience.map(String::from),
             ..Default::default()
         };
 
@@ -5865,7 +5866,7 @@ mod tests {
         with_tmp_xdg(tmpdir.path(), || {
             let runtime = tokio::runtime::Runtime::new().expect("create runtime");
             runtime.block_on(async {
-                gateway_add("http://127.0.0.1:8080", None, None, None, false, None, "openshell-cli")
+                gateway_add("http://127.0.0.1:8080", None, None, None, false, None, "openshell-cli", None)
                     .await
                     .expect("register plaintext gateway");
             });
@@ -5892,6 +5893,7 @@ mod tests {
                     true,
                     None,
                     "openshell-cli",
+                    None,
                 )
                 .await
                 .expect("register plaintext gateway");
