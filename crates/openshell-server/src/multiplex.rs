@@ -191,6 +191,9 @@ where
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
+            let mut req = req;
+            oidc::clear_internal_auth_markers(req.headers_mut());
+
             // If OIDC is not configured, pass through directly.
             let Some(cache) = oidc_cache else {
                 return inner.ready().await?.call(req).await;
@@ -212,6 +215,7 @@ where
                     let body = tonic::body::BoxBody::new(body);
                     return Ok(Response::from_parts(parts, body));
                 }
+                oidc::mark_sandbox_secret_authenticated(req.headers_mut());
                 return inner.ready().await?.call(req).await;
             }
 
@@ -219,6 +223,7 @@ where
             // Bearer token (CLI users) or sandbox secret (supervisor).
             if oidc::is_dual_auth_method(&path) {
                 if oidc::validate_sandbox_secret(req.headers(), &sandbox_secret).is_ok() {
+                    oidc::mark_sandbox_secret_authenticated(req.headers_mut());
                     return inner.ready().await?.call(req).await;
                 }
                 // Fall through to Bearer token validation below.

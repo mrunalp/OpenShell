@@ -36,7 +36,7 @@ OpenShell determines the authentication strategy per gateway via the `auth_mode`
 
 ### Interactive: Authorization Code + PKCE
 
-Used by `openshell gateway login` for interactive CLI sessions.
+Used by `openshell gateway login` for interactive CLI sessions. The login flow accepts a `client_id` (the OIDC client application) and an optional `audience` (the API resource server). When `audience` differs from `client_id` — common with providers like Entra ID — it is appended to the authorization URL so the issued token targets the correct API.
 
 ```
 CLI                            Browser                       Keycloak
@@ -56,11 +56,13 @@ CLI                            Browser                       Keycloak
  |  -------xdg-open------------->|                              |
  |                               |  5. Redirect to Keycloak     |
  |                               |  /auth?response_type=code    |
- |                               |  &client_id=openshell-cli    |
+ |                               |  &client_id={client_id}      |
  |                               |  &redirect_uri=localhost:... |
  |                               |  &code_challenge=...         |
  |                               |  &code_challenge_method=S256 |
- |                               |  &state=... --------------->|
+ |                               |  &state=...                  |
+ |                               |  [&audience={audience}]      |
+ |                               |  --------------------------->|
  |                               |                              |
  |                               |                 6. User logs |
  |                               |                    in        |
@@ -78,7 +80,7 @@ CLI                            Browser                       Keycloak
  |    grant_type=authorization_code                             |
  |    code=...                   |                              |
  |    redirect_uri=...           |                              |
- |    client_id=openshell-cli    |                              |
+ |    client_id={client_id}      |                              |
  |    code_verifier=...  ------------------------------------->|
  |                               |                              |
  |  <-- { access_token, refresh_token, expires_in } -----------|
@@ -89,16 +91,16 @@ CLI                            Browser                       Keycloak
 
 ### Non-Interactive: Client Credentials
 
-Used for CI/automation when `OPENSHELL_OIDC_CLIENT_SECRET` is set.
+Used for CI/automation when `OPENSHELL_OIDC_CLIENT_SECRET` is set. The optional `audience` parameter is included when the API resource server differs from the client ID.
 
 ```
 CI Agent                                                    Keycloak
  |                                                             |
  |  POST {token_endpoint}                                      |
  |    grant_type=client_credentials                            |
- |    client_id={OPENSHELL_OIDC_CLIENT_ID}                     |
+ |    client_id={client_id}                                    |
  |    client_secret={OPENSHELL_OIDC_CLIENT_SECRET}             |
- |    scope=openid  ----------------------------------------->|
+ |    [audience={audience}]  --------------------------------->|
  |                                                             |
  |  <-- { access_token, expires_in } -------------------------|
  |                                                             |
@@ -129,15 +131,15 @@ On every gRPC call, the CLI interceptor injects the token as a standard HTTP hea
 authorization: Bearer eyJhbGci...
 ```
 
-The server-side OIDC middleware (`OidcGrpcRouter` in `multiplex.rs`) processes each request:
+The server-side auth middleware (`AuthGrpcRouter` in `multiplex.rs`) classifies each request into one of three categories and processes it accordingly:
 
-1. Check if the gRPC method is on the **skip list** — if so, pass through without auth.
-2. Extract the `authorization: Bearer <token>` header.
-3. Decode the JWT header to find the `kid` (key ID).
-4. Look up the signing key in the **JWKS cache**. On cache miss, refresh from the JWKS endpoint.
-5. Validate the JWT: signature (RS256), `exp`, `iss`, `aud` claims.
-6. On success, forward the request to the RPC handler.
-7. On failure, return `UNAUTHENTICATED` status.
+1. **Strip internal markers** — remove `x-openshell-auth-source` from incoming headers to prevent spoofing.
+2. **Unauthenticated?** — health probes and reflection pass through with no auth.
+3. **Sandbox-secret?** — supervisor RPCs validate the `x-sandbox-secret` header against the server's SSH handshake secret. On success, mark the request with an internal `x-openshell-auth-source: sandbox-secret` header for downstream authorization.
+4. **Dual-auth?** — methods like `UpdateConfig` try sandbox-secret first; if no valid secret, fall through to Bearer token validation.
+5. **Bearer token** — extract `authorization: Bearer <token>`, decode the JWT header for `kid`, look up the signing key in the JWKS cache, and validate signature (RS256), `exp`, `iss`, `aud` claims.
+6. **Authorize** — on successful authentication, check RBAC roles via `AuthzPolicy` (in `authz.rs`).
+7. On any failure, return `UNAUTHENTICATED` or `PERMISSION_DENIED` status.
 
 ## JWKS Key Caching
 
@@ -148,24 +150,53 @@ GET {issuer}/.well-known/openid-configuration  ->  jwks_uri
 GET {jwks_uri}                                 ->  { keys: [...] }
 ```
 
-Keys are cached in memory with a configurable TTL (default: 1 hour). The cache refreshes:
-- When the TTL expires (background, on next request).
+Keys are cached in memory with a configurable TTL (default: 1 hour). A `refresh_mutex` serializes refresh operations so concurrent requests coalesce into a single HTTP fetch. The cache refreshes:
+- When the TTL expires (on next request, re-checked under the mutex to avoid thundering herd).
 - Immediately when a JWT references a `kid` not in the cache (handles key rotation).
 
-## Skip List
+## Method Authentication Categories
 
-These gRPC methods bypass OIDC validation:
+Every gRPC method falls into one of three categories, defined in `oidc.rs`:
 
-| Method | Reason |
+### Unauthenticated
+
+These methods require no authentication at all — health probes and infrastructure endpoints.
+
+| Method / Prefix | Reason |
 |---|---|
-| `Health` (both services) | Kubernetes liveness/readiness probes |
-| `GetSandboxConfig` | Called by sandbox supervisor (mTLS auth) |
-| `ReportPolicyStatus` | Called by sandbox supervisor |
-| `PushSandboxLogs` | Called by sandbox supervisor |
-| `GetSandboxProviderEnvironment` | Called by sandbox supervisor |
-| `SubmitPolicyAnalysis` | Called by sandbox supervisor |
+| `OpenShell/Health` | Kubernetes liveness/readiness probes |
+| `Inference/Health` | Inference service health probes |
 | `/grpc.reflection.*` | gRPC server reflection (debugging tools) |
 | `/grpc.health.*` | gRPC health check protocol |
+
+### Sandbox-Secret Authenticated
+
+Sandbox-to-server RPCs authenticate via the `x-sandbox-secret` metadata header, which must match the server's SSH handshake secret. These methods do not use OIDC Bearer tokens.
+
+| Method | Purpose |
+|---|---|
+| `GetSandboxConfig` (both services) | Supervisor fetches sandbox configuration |
+| `ReportPolicyStatus` | Supervisor reports policy enforcement status |
+| `PushSandboxLogs` | Supervisor streams sandbox logs to gateway |
+| `GetSandboxProviderEnvironment` | Supervisor fetches provider credentials |
+| `SubmitPolicyAnalysis` | Supervisor submits policy analysis results |
+
+### Dual-Auth
+
+These methods accept either an OIDC Bearer token (CLI users) or a sandbox secret (supervisor). The middleware tries sandbox-secret first; if not present, it falls through to Bearer token validation.
+
+| Method | Purpose |
+|---|---|
+| `UpdateConfig` | Policy and settings mutations |
+
+**Sandbox-secret restriction on `UpdateConfig`:** When a sandbox-secret-authenticated caller invokes `UpdateConfig`, the handler in `policy.rs` enforces strict scope limits via `validate_sandbox_secret_update()`. The caller:
+- **Must** provide a sandbox `name` (sandbox-scoped only).
+- **Must** include a `policy` payload (policy sync only).
+- **May not** set `global = true` (no global config mutation).
+- **May not** set `delete_setting` (no setting deletion).
+- **May not** provide a `setting_key` (no setting mutation).
+
+This ensures the sandbox supervisor can sync its own policy on startup but cannot modify global configuration or sandbox settings.
 
 ## Role-Based Access Control (RBAC)
 
@@ -175,7 +206,9 @@ After JWT validation, the server checks the user's roles against a per-method re
 
 | Operation | Required Role |
 |---|---|
-| Health, sandbox supervisor RPCs | (no auth — skip list) |
+| Health probes, reflection | (no auth — unauthenticated) |
+| Supervisor RPCs (GetSandboxConfig, etc.) | (sandbox secret — no RBAC) |
+| UpdateConfig via sandbox secret | (sandbox secret — scope-restricted, no RBAC) |
 | Sandbox create, list, delete, exec, SSH | user role |
 | Provider list, get | user role |
 | Provider create, update, delete | admin role |
@@ -198,18 +231,35 @@ When both `--oidc-admin-role` and `--oidc-user-role` are set to empty strings, R
 
 ## Server Configuration
 
-### CLI Flags / Environment Variables
+### Server Binary Flags
+
+These flags configure JWT validation on the `openshell-server` binary:
 
 | Flag | Env Var | Default | Description |
 |---|---|---|---|
 | `--oidc-issuer` | `OPENSHELL_OIDC_ISSUER` | (none) | OIDC issuer URL (enables JWT validation) |
-| `--oidc-audience` | `OPENSHELL_OIDC_AUDIENCE` | `openshell-cli` | Expected `aud` claim |
+| `--oidc-audience` | `OPENSHELL_OIDC_AUDIENCE` | `openshell-cli` | Expected `aud` claim in validated JWTs |
 | `--oidc-jwks-ttl` | `OPENSHELL_OIDC_JWKS_TTL` | `3600` | JWKS cache TTL in seconds |
 | `--oidc-roles-claim` | `OPENSHELL_OIDC_ROLES_CLAIM` | `realm_access.roles` | Dot-separated path to roles array in JWT |
 | `--oidc-admin-role` | `OPENSHELL_OIDC_ADMIN_ROLE` | `openshell-admin` | Role name for admin access |
 | `--oidc-user-role` | `OPENSHELL_OIDC_USER_ROLE` | `openshell-user` | Role name for user access |
 
 When `--oidc-issuer` is not set, OIDC validation is disabled and the server falls back to mTLS-only or plaintext behavior.
+
+### Gateway Start Flags (CLI)
+
+The `openshell gateway start` command exposes flags that configure both the server and the local gateway metadata:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--oidc-issuer` | (none) | OIDC issuer URL; passed to the server binary |
+| `--oidc-audience` | `openshell-cli` | Expected `aud` claim; passed to the server binary |
+| `--oidc-client-id` | `openshell-cli` | Client ID stored in gateway metadata for CLI login flows |
+| `--oidc-roles-claim` | (none) | Passed to the server binary if set |
+| `--oidc-admin-role` | (none) | Passed to the server binary if set |
+| `--oidc-user-role` | (none) | Passed to the server binary if set |
+
+The `--oidc-client-id` flag is **not** a server flag — it is stored in gateway metadata and used by the CLI during login. The `--oidc-audience` flag is both a server flag (for JWT validation) and stored in metadata (for token requests).
 
 ### Helm Values
 
@@ -237,23 +287,25 @@ openshell gateway start \
 
 ### Microsoft Entra ID
 
-Register an app in Azure Portal with app roles `OpenShell.Admin` and `OpenShell.User`, then:
+Register an app in Azure Portal with app roles `OpenShell.Admin` and `OpenShell.User`. With Entra ID the client ID (the SPA/public app registration) and audience (the API app registration, e.g. `api://openshell`) are typically different:
 
 ```bash
 openshell gateway start \
   --oidc-issuer https://login.microsoftonline.com/{tenant-id}/v2.0 \
   --oidc-audience api://openshell \
+  --oidc-client-id {client-id} \
   --oidc-roles-claim roles \
   --oidc-admin-role OpenShell.Admin \
   --oidc-user-role OpenShell.User
 ```
 
-CLI registration:
+CLI registration (separate client ID and audience):
 
 ```bash
 openshell gateway add https://gateway:8080 \
   --oidc-issuer https://login.microsoftonline.com/{tenant-id}/v2.0 \
-  --oidc-client-id {client-id}
+  --oidc-client-id {client-id} \
+  --oidc-audience api://openshell
 ```
 
 ### Okta
@@ -292,6 +344,12 @@ openshell gateway add http://gateway:8080 \
 openshell gateway add http://gateway:8080 \
   --oidc-issuer http://keycloak:8180/realms/openshell \
   --oidc-client-id my-client
+
+# With separate client ID and audience (e.g. Entra ID):
+openshell gateway add http://gateway:8080 \
+  --oidc-issuer https://login.microsoftonline.com/{tenant-id}/v2.0 \
+  --oidc-client-id {client-id} \
+  --oidc-audience api://openshell
 ```
 
 ### Start a K3s Gateway with OIDC
@@ -300,6 +358,14 @@ openshell gateway add http://gateway:8080 \
 openshell gateway start \
   --oidc-issuer http://keycloak:8180/realms/openshell \
   --plaintext
+
+# With RBAC configuration:
+openshell gateway start \
+  --oidc-issuer http://keycloak:8180/realms/openshell \
+  --oidc-client-id openshell-cli \
+  --oidc-roles-claim realm_access.roles \
+  --oidc-admin-role openshell-admin \
+  --oidc-user-role openshell-user
 ```
 
 ### Authenticate
@@ -352,22 +418,30 @@ Admin console: `http://localhost:8180/admin` (admin/admin).
 
 ## Coexistence with Other Auth Modes
 
-OIDC is additive — it does not replace mTLS or Cloudflare Access. The server checks auth sources in order:
+OIDC is additive — it does not replace mTLS or Cloudflare Access. When OIDC is configured, the `AuthGrpcRouter` processes requests through the three-category classification:
 
 ```
 Request arrives
   |
-  +-- Is method on skip list? --> Pass through
+  +-- Strip x-openshell-auth-source (anti-spoofing)
+  |
+  +-- OIDC not configured? --> Pass through (mTLS/plaintext fallback)
+  |
+  +-- Unauthenticated method? --> Pass through
+  |
+  +-- Sandbox-secret method?
+  |     +-- Valid x-sandbox-secret --> Mark auth-source, pass through
+  |     +-- Invalid/missing        --> UNAUTHENTICATED
+  |
+  +-- Dual-auth method?
+  |     +-- Valid x-sandbox-secret --> Mark auth-source, pass through
+  |     +-- No sandbox secret      --> Fall through to Bearer
   |
   +-- Has "authorization: Bearer" header?
-  |     +-- Validate JWT --> Authenticated (OIDC)
+  |     +-- Validate JWT --> Check RBAC --> Authenticated (OIDC)
   |     +-- Invalid JWT  --> UNAUTHENTICATED
   |
-  +-- No bearer header + OIDC configured --> UNAUTHENTICATED
-  |
-  +-- No bearer header + OIDC not configured
-        +-- mTLS verified at TLS layer --> Authenticated (mTLS)
-        +-- Plaintext --> Unauthenticated (no enforcement)
+  +-- No bearer header --> UNAUTHENTICATED
 ```
 
 The CLI determines which auth mode to use based on `auth_mode` in gateway metadata. Only one mode is active per gateway registration.
@@ -376,8 +450,10 @@ The CLI determines which auth mode to use based on `auth_mode` in gateway metada
 
 | Component | File |
 |---|---|
-| Server OIDC validation | `crates/openshell-server/src/oidc.rs` |
-| Server auth middleware | `crates/openshell-server/src/multiplex.rs` (`OidcGrpcRouter`) |
+| Server OIDC validation + method classification | `crates/openshell-server/src/oidc.rs` |
+| Server auth middleware | `crates/openshell-server/src/multiplex.rs` (`AuthGrpcRouter`) |
+| Server authorization (RBAC) | `crates/openshell-server/src/authz.rs` (`AuthzPolicy`) |
+| Sandbox-secret scope enforcement | `crates/openshell-server/src/grpc/policy.rs` (`validate_sandbox_secret_update`) |
 | Server config | `crates/openshell-core/src/config.rs` (`OidcConfig`) |
 | Server CLI flags | `crates/openshell-server/src/main.rs` |
 | Server discovery endpoint | `crates/openshell-server/src/auth.rs` (`/auth/oidc-config`) |

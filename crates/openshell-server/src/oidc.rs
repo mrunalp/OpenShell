@@ -22,6 +22,14 @@ use tokio::sync::RwLock;
 use tonic::Status;
 use tracing::{debug, info, warn};
 
+/// Internal metadata header set by the auth middleware after it validates
+/// a sandbox-secret-authenticated request. This is stripped from all incoming
+/// requests first so external callers cannot spoof it.
+pub const INTERNAL_AUTH_SOURCE_HEADER: &str = "x-openshell-auth-source";
+/// Internal auth-source marker for requests authenticated via the shared
+/// sandbox secret.
+pub const AUTH_SOURCE_SANDBOX_SECRET: &str = "sandbox-secret";
+
 /// Truly unauthenticated methods — health probes and infrastructure.
 const UNAUTHENTICATED_METHODS: &[&str] = &[
     "/openshell.v1.OpenShell/Health",
@@ -87,6 +95,28 @@ pub fn validate_sandbox_secret(
     }
 
     Ok(())
+}
+
+/// Remove internal auth-source markers from the request before any auth
+/// decision is made so external callers cannot spoof them.
+pub fn clear_internal_auth_markers(headers: &mut http::HeaderMap) {
+    headers.remove(INTERNAL_AUTH_SOURCE_HEADER);
+}
+
+/// Mark the request as authenticated via the shared sandbox secret.
+pub fn mark_sandbox_secret_authenticated(headers: &mut http::HeaderMap) {
+    headers.insert(
+        INTERNAL_AUTH_SOURCE_HEADER,
+        http::HeaderValue::from_static(AUTH_SOURCE_SANDBOX_SECRET),
+    );
+}
+
+/// Returns `true` if the request metadata indicates sandbox-secret auth.
+pub fn is_sandbox_secret_authenticated(metadata: &tonic::metadata::MetadataMap) -> bool {
+    metadata
+        .get(INTERNAL_AUTH_SOURCE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        == Some(AUTH_SOURCE_SANDBOX_SECRET)
 }
 
 /// Cached JWKS key set fetched from the OIDC issuer.
