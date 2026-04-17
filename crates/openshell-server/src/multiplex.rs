@@ -215,6 +215,15 @@ where
                 return inner.ready().await?.call(req).await;
             }
 
+            // Dual-auth methods (e.g. UpdateConfig) — accept either a
+            // Bearer token (CLI users) or sandbox secret (supervisor).
+            if oidc::is_dual_auth_method(&path) {
+                if oidc::validate_sandbox_secret(req.headers(), &sandbox_secret).is_ok() {
+                    return inner.ready().await?.call(req).await;
+                }
+                // Fall through to Bearer token validation below.
+            }
+
             // Extract Bearer token from the authorization header.
             let token = req
                 .headers()

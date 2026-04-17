@@ -858,9 +858,25 @@ enum GatewayCommands {
         #[arg(long)]
         oidc_issuer: Option<String>,
 
-        /// OIDC audience (client ID) for JWT validation.
+        /// OIDC audience for the API resource server.
         #[arg(long, default_value = "openshell-cli", requires = "oidc_issuer")]
         oidc_audience: String,
+
+        /// OIDC client ID stored in gateway metadata for CLI login.
+        #[arg(long, default_value = "openshell-cli", requires = "oidc_issuer")]
+        oidc_client_id: String,
+
+        /// Dot-separated path to the roles array in the JWT claims.
+        #[arg(long, requires = "oidc_issuer")]
+        oidc_roles_claim: Option<String>,
+
+        /// Role name that grants admin access.
+        #[arg(long, requires = "oidc_issuer")]
+        oidc_admin_role: Option<String>,
+
+        /// Role name that grants standard user access.
+        #[arg(long, requires = "oidc_issuer")]
+        oidc_user_role: Option<String>,
     },
 
     /// Stop the gateway (preserves state).
@@ -1724,6 +1740,10 @@ async fn main() -> Result<()> {
                 gpu,
                 oidc_issuer,
                 oidc_audience,
+                oidc_client_id,
+                oidc_roles_claim,
+                oidc_admin_role,
+                oidc_user_role,
             } => {
                 let gpu = if gpu {
                     vec!["auto".to_string()]
@@ -1744,6 +1764,10 @@ async fn main() -> Result<()> {
                     gpu,
                     oidc_issuer.as_deref(),
                     &oidc_audience,
+                    &oidc_client_id,
+                    oidc_roles_claim.as_deref(),
+                    oidc_admin_role.as_deref(),
+                    oidc_user_role.as_deref(),
                 )
                 .await?;
             }

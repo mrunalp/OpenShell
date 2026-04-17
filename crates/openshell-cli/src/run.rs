@@ -1073,7 +1073,7 @@ pub async fn gateway_add(
 
         // Check for client_credentials env var (CI mode).
         if std::env::var("OPENSHELL_OIDC_CLIENT_SECRET").is_ok() {
-            match crate::oidc_auth::oidc_client_credentials_flow(issuer, oidc_client_id).await {
+            match crate::oidc_auth::oidc_client_credentials_flow(issuer, oidc_client_id, oidc_audience).await {
                 Ok(bundle) => {
                     openshell_bootstrap::oidc_token::store_oidc_token(name, &bundle)?;
                     eprintln!(
@@ -1086,7 +1086,7 @@ pub async fn gateway_add(
                 }
             }
         } else {
-            match crate::oidc_auth::oidc_browser_auth_flow(issuer, oidc_client_id).await {
+            match crate::oidc_auth::oidc_browser_auth_flow(issuer, oidc_client_id, oidc_audience).await {
                 Ok(bundle) => {
                     openshell_bootstrap::oidc_token::store_oidc_token(name, &bundle)?;
                     eprintln!("{} Authenticated successfully", "✓".green().bold());
@@ -1239,11 +1239,12 @@ pub async fn gateway_login(name: &str) -> Result<()> {
                 miette::miette!("Gateway '{name}' has OIDC auth but no issuer URL in metadata")
             })?;
             let client_id = metadata.oidc_client_id.as_deref().unwrap_or("openshell-cli");
+            let audience = metadata.oidc_audience.as_deref();
 
             let bundle = if std::env::var("OPENSHELL_OIDC_CLIENT_SECRET").is_ok() {
-                crate::oidc_auth::oidc_client_credentials_flow(issuer, client_id).await?
+                crate::oidc_auth::oidc_client_credentials_flow(issuer, client_id, audience).await?
             } else {
-                crate::oidc_auth::oidc_browser_auth_flow(issuer, client_id).await?
+                crate::oidc_auth::oidc_browser_auth_flow(issuer, client_id, audience).await?
             };
 
             let username = jwt_preferred_username(&bundle.access_token);
@@ -1564,6 +1565,10 @@ pub async fn gateway_admin_deploy(
     gpu: Vec<String>,
     oidc_issuer: Option<&str>,
     oidc_audience: &str,
+    oidc_client_id: &str,
+    oidc_roles_claim: Option<&str>,
+    oidc_admin_role: Option<&str>,
+    oidc_user_role: Option<&str>,
 ) -> Result<()> {
     let location = if remote.is_some() { "remote" } else { "local" };
 
@@ -1633,6 +1638,16 @@ pub async fn gateway_admin_deploy(
     if let Some(issuer) = oidc_issuer {
         options = options.with_oidc_issuer(issuer);
         options = options.with_oidc_audience(oidc_audience);
+        options.oidc_client_id = oidc_client_id.to_string();
+        if let Some(claim) = oidc_roles_claim {
+            options.oidc_roles_claim = Some(claim.to_string());
+        }
+        if let Some(role) = oidc_admin_role {
+            options.oidc_admin_role = Some(role.to_string());
+        }
+        if let Some(role) = oidc_user_role {
+            options.oidc_user_role = Some(role.to_string());
+        }
     }
 
     let handle = deploy_gateway_with_panel(options, name, location).await?;

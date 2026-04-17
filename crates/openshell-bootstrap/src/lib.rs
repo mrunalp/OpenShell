@@ -126,8 +126,10 @@ pub struct DeployOptions {
     pub recreate: bool,
     /// OIDC issuer URL. When set, the server validates Bearer JWTs.
     pub oidc_issuer: Option<String>,
-    /// OIDC audience (client ID). Defaults to "openshell-cli".
+    /// OIDC audience for the API resource server. Defaults to "openshell-cli".
     pub oidc_audience: String,
+    /// OIDC client ID for CLI login. Defaults to "openshell-cli".
+    pub oidc_client_id: String,
     /// OIDC roles claim path (e.g. "realm_access.roles").
     pub oidc_roles_claim: Option<String>,
     /// OIDC admin role name.
@@ -152,6 +154,7 @@ impl DeployOptions {
             recreate: false,
             oidc_issuer: None,
             oidc_audience: "openshell-cli".to_string(),
+            oidc_client_id: "openshell-cli".to_string(),
             oidc_roles_claim: None,
             oidc_admin_role: None,
             oidc_user_role: None,
@@ -304,6 +307,7 @@ where
     let recreate = options.recreate;
     let oidc_issuer = options.oidc_issuer;
     let oidc_audience = options.oidc_audience;
+    let oidc_client_id = options.oidc_client_id;
     let oidc_roles_claim = options.oidc_roles_claim;
     let oidc_admin_role = options.oidc_admin_role;
     let oidc_user_role = options.oidc_user_role;
@@ -606,7 +610,7 @@ where
         if oidc_issuer.is_some() {
             metadata.auth_mode = Some("oidc".to_string());
             metadata.oidc_issuer = oidc_issuer.clone();
-            metadata.oidc_client_id = Some("openshell-cli".to_string());
+            metadata.oidc_client_id = Some(oidc_client_id.clone());
             metadata.oidc_audience = Some(oidc_audience.clone());
         }
         store_gateway_metadata(&name, &metadata)?;

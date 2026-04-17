@@ -100,7 +100,11 @@ fn csprng_fill(buf: &mut [u8]) {
 ///
 /// Opens the user's browser to the Keycloak login page and waits for
 /// the authorization code redirect on a localhost callback server.
-pub async fn oidc_browser_auth_flow(issuer: &str, client_id: &str) -> Result<OidcTokenBundle> {
+pub async fn oidc_browser_auth_flow(
+    issuer: &str,
+    client_id: &str,
+    audience: Option<&str>,
+) -> Result<OidcTokenBundle> {
     let discovery = discover(issuer).await?;
 
     let code_verifier = generate_code_verifier();
@@ -111,7 +115,7 @@ pub async fn oidc_browser_auth_flow(issuer: &str, client_id: &str) -> Result<Oid
     let port = listener.local_addr().into_diagnostic()?.port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
 
-    let auth_url = format!(
+    let mut auth_url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&code_challenge={}&code_challenge_method=S256&state={}&scope=openid",
         discovery.authorization_endpoint,
         urlencoded(client_id),
@@ -119,6 +123,11 @@ pub async fn oidc_browser_auth_flow(issuer: &str, client_id: &str) -> Result<Oid
         urlencoded(&code_challenge),
         urlencoded(&state),
     );
+    // Request a specific API audience when configured (needed for providers
+    // like Entra ID where the API audience differs from the client ID).
+    if let Some(aud) = audience {
+        auth_url.push_str(&format!("&audience={}", urlencoded(aud)));
+    }
 
     let (tx, rx) = oneshot::channel::<String>();
     let expected_state = state.clone();
@@ -170,6 +179,7 @@ pub async fn oidc_browser_auth_flow(issuer: &str, client_id: &str) -> Result<Oid
 pub async fn oidc_client_credentials_flow(
     issuer: &str,
     client_id: &str,
+    audience: Option<&str>,
 ) -> Result<OidcTokenBundle> {
     let client_secret = std::env::var("OPENSHELL_OIDC_CLIENT_SECRET").map_err(|_| {
         miette::miette!(
@@ -179,11 +189,14 @@ pub async fn oidc_client_credentials_flow(
 
     let discovery = discover(issuer).await?;
 
-    let params = [
+    let mut params = vec![
         ("grant_type", "client_credentials"),
         ("client_id", client_id),
-        ("client_secret", &client_secret),
+        ("client_secret", client_secret.as_str()),
     ];
+    if let Some(aud) = audience {
+        params.push(("audience", aud));
+    }
 
     let client = reqwest::Client::new();
     let resp: TokenResponse = client
