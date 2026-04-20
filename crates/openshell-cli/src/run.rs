@@ -1048,10 +1048,20 @@ pub async fn gateway_add(
     // OIDC takes precedence over plaintext/mTLS/edge detection — the user
     // explicitly opted in with --oidc-issuer regardless of scheme.
     if let Some(issuer) = oidc_issuer {
+        // When --local is combined with --oidc-issuer, extract mTLS certs
+        // from the running container so the CLI can establish a TLS
+        // connection while using OIDC for application-level auth.
+        if local {
+            let endpoint_port = url::Url::parse(&endpoint).ok().and_then(|u| u.port());
+            eprintln!("• Extracting TLS certificates from gateway container...");
+            openshell_bootstrap::extract_and_store_pki(name, None, endpoint_port)
+                .await?;
+        }
+
         let metadata = GatewayMetadata {
             name: name.to_string(),
             gateway_endpoint: endpoint.clone(),
-            is_remote: true,
+            is_remote: !local,
             auth_mode: Some("oidc".to_string()),
             oidc_issuer: Some(issuer.to_string()),
             oidc_client_id: Some(oidc_client_id.to_string()),
@@ -1069,6 +1079,9 @@ pub async fn gateway_add(
         );
         eprintln!("  {} {}", "Endpoint:".dimmed(), endpoint);
         eprintln!("  {} oidc", "Auth:".dimmed());
+        if local {
+            eprintln!("{} TLS certificates extracted", "✓".green().bold());
+        }
         eprintln!();
 
         // Check for client_credentials env var (CI mode).

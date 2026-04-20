@@ -956,7 +956,7 @@ enum GatewayCommands {
 
         /// Register as an OIDC-authenticated gateway using the given issuer URL.
         /// The server must be configured with `--oidc-issuer` matching this URL.
-        #[arg(long, conflicts_with_all = ["remote", "local"])]
+        #[arg(long, conflicts_with = "remote")]
         oidc_issuer: Option<String>,
 
         /// OIDC client ID for the CLI login flow (defaults to "openshell-cli").

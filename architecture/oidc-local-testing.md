@@ -13,7 +13,7 @@ including both standalone server testing and full end-to-end K3s testing.
 ## 1. Start Keycloak
 
 ```bash
-./scripts/keycloak-dev.sh start
+mise run keycloak
 ```
 
 Wait for "Keycloak is ready." The script prints connection info including test users.
@@ -181,216 +181,160 @@ cargo run -p openshell-cli --features bundled-z3 -- sandbox list
 This deploys a full K3s cluster with OIDC enforcement and tests sandbox
 creation, RBAC, login/logout, and token expiry.
 
-### 4a. Determine host IP
+### 4a. Bootstrap the cluster with OIDC
 
-Keycloak runs on the host. The K3s container must reach it via the host IP:
+Keycloak runs on the host. The K3s container reaches it via the host IP.
+The `OPENSHELL_OIDC_ISSUER` env var tells the deploy script to pass the
+issuer to the Helm chart so the gateway starts with JWT validation enabled.
 
 ```bash
 HOST_IP=$(hostname -I | awk '{print $1}')
-echo "Host IP: $HOST_IP"
+OPENSHELL_OIDC_ISSUER="http://${HOST_IP}:8180/realms/openshell" mise run cluster
 ```
 
-### 4b. Start K3s gateway
+Wait for "Deploy complete!" and verify OIDC is active:
 
 ```bash
-cargo run -p openshell-cli --features bundled-z3 -- gateway start \
-  --oidc-issuer "http://${HOST_IP}:8180/realms/openshell" \
-  --plaintext \
-  --recreate
-```
-
-Wait for "Gateway ready."
-
-### 4c. Build and deploy custom server image
-
-The released `gateway:dev` image does not include OIDC code. Build a custom
-image with the locally-compiled server binary and inject it into K3s.
-
-The binary name changed to `openshell-gateway` after the compute-driver
-refactor, but the base image's `ENTRYPOINT` still references
-`openshell-server`. The Dockerfile copies the binary under both names.
-
-```bash
-# Build the server binary
-cargo build -p openshell-server --release
-
-# Create the custom image
-cat > /tmp/Dockerfile.gateway-oidc <<'EOF'
-FROM ghcr.io/nvidia/openshell/gateway:dev
-USER root
-COPY openshell-gateway /usr/local/bin/openshell-gateway
-COPY openshell-gateway /usr/local/bin/openshell-server
-RUN chmod +x /usr/local/bin/openshell-gateway /usr/local/bin/openshell-server
-USER openshell
-EOF
-
-docker build -t gateway:oidc-local \
-  -f /tmp/Dockerfile.gateway-oidc \
-  target/release
-
-# Import into K3s containerd
 CONTAINER=$(docker ps --format '{{.Names}}' | grep openshell-cluster)
-docker save gateway:oidc-local | docker exec -i $CONTAINER ctr images import --all-platforms -
-
-# Patch the statefulset: custom image + OIDC env vars
-HOST_IP=$(hostname -I | awk '{print $1}')
-docker exec $CONTAINER kubectl -n openshell set env statefulset/openshell \
-  OPENSHELL_OIDC_ISSUER=http://${HOST_IP}:8180/realms/openshell \
-  OPENSHELL_OIDC_AUDIENCE=openshell-cli
-
-docker exec $CONTAINER kubectl -n openshell patch statefulset openshell --type='json' -p='[
-  {"op":"replace","path":"/spec/template/spec/containers/0/image","value":"docker.io/library/gateway:oidc-local"},
-  {"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"Never"}
-]'
-
-# Restart the pod to pick up the new image
-docker exec $CONTAINER kubectl -n openshell delete pod openshell-0
-
-# Wait for the new pod and verify OIDC is active
-sleep 15
 docker exec $CONTAINER kubectl -n openshell logs openshell-0 | grep OIDC
 # Expected: OIDC JWT validation enabled (issuer: http://...)
 ```
 
-If you don't see the "OIDC JWT validation enabled" line, check that:
-- The pod is using the custom image (not the released one)
-- The OIDC env vars are set on the pod
-- Keycloak is reachable from inside the K3s container at the host IP
+### 4b. Login to the gateway
+
+The bootstrap step above configures the gateway metadata with the OIDC
+issuer automatically. Authenticate with Keycloak:
 
 ```bash
-# Verify image
-docker exec $CONTAINER kubectl -n openshell get pod openshell-0 \
-  -o jsonpath='{.spec.containers[0].image}'; echo
-
-# Verify env vars
-docker exec $CONTAINER kubectl -n openshell get pod openshell-0 \
-  -o jsonpath='{range .spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' | grep OIDC
+openshell gateway login
+# Login with: admin@test / admin
+# Expected: ✓ Authenticated to gateway 'openshell' as admin@test
 ```
 
-### 4d. Login and create sandboxes
+### 4c. Create and list sandboxes
 
 ```bash
 # Login as admin
-cargo run -p openshell-cli --features bundled-z3 -- gateway login
+openshell gateway login
 # Login with: admin@test / admin
 # Expected: ✓ Authenticated to gateway 'openshell' as admin@test
 
 # Create a sandbox
-cargo run -p openshell-cli --features bundled-z3 -- sandbox create
+openshell sandbox create
 # Expected: Created sandbox: <name>
 
 # List sandboxes
-cargo run -p openshell-cli --features bundled-z3 -- sandbox list
+openshell sandbox list
 # Expected: shows the created sandbox
 ```
 
-### 4e. Verify authentication enforcement
+### 4d. Verify authentication enforcement
 
 ```bash
 # Logout
-cargo run -p openshell-cli --features bundled-z3 -- gateway logout
+openshell gateway logout
 # Expected: ✓ Logged out of gateway 'openshell'
 
 # Should fail without token
-cargo run -p openshell-cli --features bundled-z3 -- sandbox list
+openshell sandbox list
 # Expected: Unauthenticated error
 
 # Login again
-cargo run -p openshell-cli --features bundled-z3 -- gateway login
+openshell gateway login
 # Login with: admin@test / admin
 
 # Should work again
-cargo run -p openshell-cli --features bundled-z3 -- sandbox list
+openshell sandbox list
 # Expected: shows sandboxes
 ```
 
-### 4f. Verify token expiry
+### 4e. Verify token expiry
 
 Keycloak access tokens expire after 5 minutes by default.
 
 ```bash
 # Wait 5+ minutes, then:
-cargo run -p openshell-cli --features bundled-z3 -- sandbox list
+openshell sandbox list
 # Expected: Unauthenticated: ExpiredSignature
 
 # Re-login
-cargo run -p openshell-cli --features bundled-z3 -- gateway login
-cargo run -p openshell-cli --features bundled-z3 -- sandbox list
+openshell gateway login
+openshell sandbox list
 # Expected: success
 ```
 
-### 4g. Verify RBAC
+### 4f. Verify RBAC
 
 ```bash
 # Login as admin
-cargo run -p openshell-cli --features bundled-z3 -- gateway login
+openshell gateway login
 # Login with: admin@test / admin
 
 # Admin can create a provider
-cargo run -p openshell-cli --features bundled-z3 -- provider create \
+openshell provider create \
   --name test-provider --type claude --credential API_KEY=test123
 # Expected: success
 
 # Login as user (openshell-user only, no openshell-admin)
-cargo run -p openshell-cli --features bundled-z3 -- gateway login
+openshell gateway login
 # Login with: user@test / user
 # Expected: ✓ Authenticated to gateway 'openshell' as user@test
 
 # User can list sandboxes
-cargo run -p openshell-cli --features bundled-z3 -- sandbox list
+openshell sandbox list
 # Expected: success
 
 # User can list providers
-cargo run -p openshell-cli --features bundled-z3 -- provider list
+openshell provider list
 # Expected: shows test-provider
 
 # User CANNOT create a provider
-cargo run -p openshell-cli --features bundled-z3 -- provider create \
+openshell provider create \
   --name blocked --type claude --credential API_KEY=nope
 # Expected: PermissionDenied: role 'openshell-admin' required
 
 # User CANNOT delete a provider
-cargo run -p openshell-cli --features bundled-z3 -- provider delete test-provider
+openshell provider delete test-provider
 # Expected: PermissionDenied: role 'openshell-admin' required
 
 # User CAN create sandboxes
-cargo run -p openshell-cli --features bundled-z3 -- sandbox create
+openshell sandbox create
 # Expected: success
 ```
 
-### 4h. Test client credentials (CI mode)
+### 4g. Test client credentials (CI mode)
 
 ```bash
 OPENSHELL_OIDC_CLIENT_SECRET=ci-test-secret \
-cargo run -p openshell-cli --features bundled-z3 -- gateway login
+openshell gateway login
 # Expected: ✓ Authenticated to gateway 'openshell' (no browser)
 
-cargo run -p openshell-cli --features bundled-z3 -- sandbox list
+openshell sandbox list
 # Expected: success
 ```
 
-### 4i. Clean up sandboxes
+### 4h. Clean up sandboxes
 
 ```bash
 # Login as admin to clean up
-cargo run -p openshell-cli --features bundled-z3 -- gateway login
+openshell gateway login
 # Login with: admin@test / admin
 
-cargo run -p openshell-cli --features bundled-z3 -- sandbox list
+openshell sandbox list
 # Note sandbox names, then:
-cargo run -p openshell-cli --features bundled-z3 -- sandbox delete <name>
+openshell sandbox delete <name>
 
-cargo run -p openshell-cli --features bundled-z3 -- provider delete test-provider
+openshell provider delete test-provider
 ```
 
 ## 5. Cleanup
 
 ```bash
-# Stop the gateway (preserves K3s state for next start)
-cargo run -p openshell-cli --features bundled-z3 -- gateway stop
+# Stop the cluster
+mise run cluster:stop
 
 # Stop Keycloak
-./scripts/keycloak-dev.sh stop
+mise run keycloak:stop
 ```
 
 ## Test Users
@@ -440,7 +384,9 @@ cargo run -p openshell-cli --features bundled-z3 -- gateway stop
 
 **"invalid token: unknown signing key"** — JWKS key mismatch. Restart the server to refresh the cache.
 
-**No "OIDC JWT validation enabled" in K3s logs** — The server pod is running the released binary (no OIDC code). Follow section 4c to build and deploy a custom image. Ensure the Dockerfile copies the binary as both `openshell-gateway` and `openshell-server` since the base image entrypoint uses `openshell-server`.
+**No "OIDC JWT validation enabled" in K3s logs** — The `OPENSHELL_OIDC_ISSUER` env var was not set when deploying. Re-run `OPENSHELL_OIDC_ISSUER="http://<HOST_IP>:8180/realms/openshell" mise run cluster gateway` to rebuild and redeploy with OIDC enabled.
+
+**"InvalidIssuer"** — The issuer URL in the OIDC token does not match the server's configured issuer. Ensure the gateway metadata `oidc_issuer` uses the same URL the server was started with (typically the host IP, not `localhost`).
 
 **"connection refused" with grpcurl** — On Fedora/systems where `localhost` resolves to IPv6, use `127.0.0.1` instead of `localhost`.
 
