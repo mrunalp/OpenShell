@@ -16,13 +16,15 @@ KEYCLOAK_PORT="${KEYCLOAK_PORT:-8180}"
 REALM_FILE="$(cd "$(dirname "$0")" && pwd)/keycloak-realm.json"
 HEALTH_TIMEOUT=90
 
-# Prefer podman, fall back to docker.
-if command -v podman &>/dev/null; then
-    CTR=podman
+# Container runtime: honour CONTAINER_RUNTIME, else prefer docker, fall back to podman.
+if [ -n "${CONTAINER_RUNTIME:-}" ]; then
+    CTR="$CONTAINER_RUNTIME"
 elif command -v docker &>/dev/null; then
     CTR=docker
+elif command -v podman &>/dev/null; then
+    CTR=podman
 else
-    echo "Error: neither podman nor docker found in PATH" >&2
+    echo "Error: neither docker nor podman found in PATH" >&2
     exit 1
 fi
 
