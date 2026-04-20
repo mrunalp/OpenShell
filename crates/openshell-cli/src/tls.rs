@@ -288,10 +288,28 @@ pub async fn build_channel(server: &str, tls: &TlsOptions) -> Result<Channel> {
         .http2_keep_alive_interval(Duration::from_secs(10))
         .keep_alive_while_idle(true);
 
-    let tls_config = if tls.is_bearer_auth() {
-        // Bearer mode without HTTPS (e.g. http:// direct) — no tunnel needed,
-        // but also no TLS config to set. This branch shouldn't normally happen
-        // (edge endpoints are always HTTPS) but handle gracefully.
+    let tls_config = if tls.oidc_token.is_some() {
+        // OIDC bearer auth over HTTPS: use mTLS certs for the transport layer
+        // when available (server may still require client certs), and layer
+        // the Bearer token on top via the interceptor.
+        match require_tls_materials(server, tls) {
+            Ok(materials) => build_tonic_tls_config(&materials),
+            Err(_) => {
+                let resolved = tls.with_default_paths(server);
+                if let Some(ca_path) = resolved.ca.as_ref() {
+                    if let Ok(ca_pem) = std::fs::read(ca_path) {
+                        ClientTlsConfig::new().ca_certificate(Certificate::from_pem(ca_pem))
+                    } else {
+                        ClientTlsConfig::new()
+                    }
+                } else {
+                    ClientTlsConfig::new()
+                }
+            }
+        }
+    } else if tls.edge_token.is_some() {
+        // Edge bearer mode — routed through tunnel above; if we reach here
+        // the server is not HTTPS so connect plaintext.
         return endpoint.connect().await.into_diagnostic();
     } else {
         // Standard mTLS: private CA + client cert.
