@@ -25,7 +25,10 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tower::ServiceExt;
 
-use crate::{OpenShellService, ServerState, authz::AuthzPolicy, http_router, inference::InferenceService, oidc};
+use crate::{
+    OpenShellService, ServerState, authz::AuthzPolicy, http_router, inference::InferenceService,
+    oidc,
+};
 
 /// Maximum inbound gRPC message size (1 MB).
 ///
@@ -60,6 +63,7 @@ impl MultiplexService {
         let authz_policy = self.state.config.oidc.as_ref().map(|oidc| AuthzPolicy {
             admin_role: oidc.admin_role.clone(),
             user_role: oidc.user_role.clone(),
+            scopes_enabled: !oidc.scopes_claim.is_empty(),
         });
         let grpc_service = AuthGrpcRouter::new(
             GrpcRouter::new(openshell, inference),
