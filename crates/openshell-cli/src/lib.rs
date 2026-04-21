@@ -12,6 +12,7 @@ pub mod auth;
 pub mod bootstrap;
 pub mod completers;
 pub mod edge_tunnel;
+pub mod oidc_auth;
 pub mod run;
 pub mod ssh;
 pub mod tls;
