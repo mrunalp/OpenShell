@@ -26,8 +26,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tower::ServiceExt;
 
 use crate::{
-    OpenShellService, ServerState, authz::AuthzPolicy, http_router, inference::InferenceService,
-    oidc,
+    OpenShellService, ServerState, auth::authz::AuthzPolicy, auth::oidc, http_router,
+    inference::InferenceService,
 };
 
 /// Maximum inbound gRPC message size (1 MB).

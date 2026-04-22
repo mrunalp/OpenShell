@@ -11,7 +11,7 @@
 #![allow(clippy::items_after_statements)] // DB_PORTS const inside function
 
 use crate::persistence::{DraftChunkRecord, PolicyRecord, Store};
-use crate::{ServerState, oidc};
+use crate::{ServerState, auth::oidc};
 use openshell_core::proto::setting_value;
 use openshell_core::proto::{
     ApproveAllDraftChunksRequest, ApproveAllDraftChunksResponse, ApproveDraftChunkRequest,
