@@ -5,12 +5,7 @@
 //!
 //! Reads per-method `(openshell.options.v1.authorization)` annotations from
 //! the compiled `FileDescriptorSet` and builds an auth lookup table keyed by
-//! gRPC path. This module runs alongside the proc-macro-based tables in
-//! `method_authz` during the migration; a cross-validation test ensures both
-//! agree before the proc macro is removed.
-
-// Public API consumed by the runtime in Step 2; only tests use it in Step 1.
-#![allow(dead_code)]
+//! gRPC path. The `method_authz` module re-exports the public API from here.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -57,6 +52,7 @@ impl DescriptorAuthEntry {
     /// Returns `true` when this method uses workspace-level authorization
     /// (checked by the handler) rather than global-level (checked by
     /// middleware).
+    #[allow(dead_code)]
     pub fn is_workspace_scoped(&self) -> bool {
         self.workspace_role.is_some()
     }
@@ -161,6 +157,7 @@ pub fn lookup(method: &str) -> Option<&'static DescriptorAuthEntry> {
 }
 
 /// Iterator over all registered method paths.
+#[cfg(test)]
 pub fn all_paths() -> impl Iterator<Item = &'static str> {
     TABLE.entries.keys().map(String::as_str)
 }
@@ -207,82 +204,5 @@ mod tests {
             );
             seen.push(path);
         }
-    }
-
-    /// Cross-validate descriptor-pool annotations against the proc-macro
-    /// annotations. This test ensures the proto annotations are a faithful
-    /// mirror of the existing `#[rpc_auth]` attributes before the cutover.
-    ///
-    /// Known intentional divergences (Phase 2 role changes) are listed in
-    /// `KNOWN_ROLE_CHANGES` and excluded from the role comparison.
-    #[test]
-    fn proto_annotations_match_proc_macro_annotations() {
-        use super::super::method_authz;
-
-        // Methods where the proto annotation intentionally changes the role
-        // relative to the current proc-macro annotation. These are Phase 2
-        // role escalations applied in the proto from the start.
-        const KNOWN_ROLE_CHANGES: &[&str] = &[
-            // Currently role=user in proc-macro, promoted to
-            // global_role=platform_admin in proto.
-            "/openshell.v1.OpenShell/GetGatewayConfig",
-        ];
-
-        let mut mismatches: Vec<String> = Vec::new();
-
-        for path in method_authz::all_paths() {
-            let macro_entry = method_authz::lookup(path).expect("proc-macro lookup should succeed");
-
-            let Some(desc_entry) = lookup(path) else {
-                mismatches.push(format!(
-                    "{path}: present in proc-macro but missing in descriptor pool"
-                ));
-                continue;
-            };
-
-            // auth_mode must match
-            if macro_entry.mode != desc_entry.auth_mode {
-                mismatches.push(format!(
-                    "{path}: auth_mode mismatch — proc-macro={:?}, descriptor={:?}",
-                    macro_entry.mode, desc_entry.auth_mode
-                ));
-            }
-
-            // scope must match
-            let macro_scope = macro_entry.scope.map(String::from);
-            if macro_scope != desc_entry.scope {
-                mismatches.push(format!(
-                    "{path}: scope mismatch — proc-macro={:?}, descriptor={:?}",
-                    macro_entry.scope, desc_entry.scope
-                ));
-            }
-
-            // role must match (unless known divergence)
-            if !KNOWN_ROLE_CHANGES.contains(&path) {
-                let desc_role = desc_entry.effective_role();
-                if macro_entry.role != desc_role {
-                    mismatches.push(format!(
-                        "{path}: role mismatch — proc-macro={:?}, descriptor={:?}",
-                        macro_entry.role, desc_role
-                    ));
-                }
-            }
-        }
-
-        // Also check that every descriptor-pool entry has a matching
-        // proc-macro entry (catches stale proto annotations).
-        for path in all_paths() {
-            if method_authz::lookup(path).is_none() {
-                mismatches.push(format!(
-                    "{path}: present in descriptor pool but missing in proc-macro"
-                ));
-            }
-        }
-
-        assert!(
-            mismatches.is_empty(),
-            "cross-validation failures:\n{}",
-            mismatches.join("\n")
-        );
     }
 }

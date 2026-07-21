@@ -17,7 +17,6 @@ use openshell_core::{ObjectId, ObjectLabels, ObjectWorkspace};
 use openshell_providers::normalize_provider_type;
 use openshell_router::config::ResolvedRoute as RouterResolvedRoute;
 use openshell_router::{ValidationFailureKind, verify_backend_endpoint};
-use openshell_server_macros::rpc_authz;
 use prost::Message as _;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,10 +61,8 @@ impl ObjectType for InferenceRoute {
     }
 }
 
-#[rpc_authz(service = "openshell.inference.v1.Inference")]
 #[tonic::async_trait]
 impl Inference for InferenceService {
-    #[rpc_auth(auth = "sandbox")]
     async fn get_inference_bundle(
         &self,
         request: Request<GetInferenceBundleRequest>,
@@ -88,7 +85,6 @@ impl Inference for InferenceService {
             .map(Response::new)
     }
 
-    #[rpc_auth(auth = "bearer", scope = "inference:write", role = "admin")]
     async fn set_inference_route(
         &self,
         request: Request<SetInferenceRouteRequest>,
@@ -129,7 +125,6 @@ impl Inference for InferenceService {
         }))
     }
 
-    #[rpc_auth(auth = "bearer", scope = "inference:read", role = "user")]
     async fn get_inference_route(
         &self,
         request: Request<GetInferenceRouteRequest>,
@@ -173,7 +168,6 @@ impl Inference for InferenceService {
         }))
     }
 
-    #[rpc_auth(auth = "bearer", scope = "inference:write", role = "admin")]
     async fn delete_inference_route(
         &self,
         request: Request<DeleteInferenceRouteRequest>,

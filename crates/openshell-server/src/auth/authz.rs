@@ -13,7 +13,7 @@
 //! authorization is a gateway concern.
 
 use super::identity::Identity;
-use super::method_authz::{self, Role};
+use super::{descriptor_authz, method_authz};
 use tonic::Status;
 use tracing::debug;
 
@@ -62,14 +62,16 @@ impl AuthzPolicy {
     /// Returns `Ok(())` if authorized, `Err(PERMISSION_DENIED)` if not.
     /// When both role names are empty, all authenticated callers are authorized
     /// (authentication-only mode for providers like GitHub).
+    ///
+    /// Methods annotated with `global_role` (e.g. `"platform_admin"`) require
+    /// the `admin_role` OIDC claim. Methods annotated with only
+    /// `workspace_role` require the `user_role` OIDC claim — the handler
+    /// enforces workspace-level role via `authorize_workspace()`.
     #[allow(clippy::result_large_err)]
     pub fn check(&self, identity: &Identity, method: &str) -> Result<(), Status> {
-        let required = match method_authz::required_role(method) {
-            Some(Role::Admin) => &self.admin_role,
-            // Default to user role for unknown methods, matching the
-            // pre-annotation behavior. The exhaustiveness test ensures
-            // every real RPC has an explicit declaration.
-            Some(Role::User) | None => &self.user_role,
+        let required = match descriptor_authz::lookup(method) {
+            Some(entry) if entry.global_role.is_some() => &self.admin_role,
+            _ => &self.user_role,
         };
 
         // Empty role name = skip role check for this level (auth-only mode).
@@ -180,23 +182,49 @@ mod tests {
     }
 
     #[test]
-    fn user_cannot_access_admin_methods() {
+    fn user_blocked_for_platform_admin_methods() {
         let id = identity_with_roles(&["openshell-user"]);
         let policy = default_policy();
         assert!(
             policy
-                .check(&id, "/openshell.v1.OpenShell/CreateProvider")
+                .check(&id, "/openshell.v1.OpenShell/CreateWorkspace")
+                .is_err()
+        );
+        assert!(
+            policy
+                .check(&id, "/openshell.v1.OpenShell/GetGatewayInfo")
                 .is_err()
         );
     }
 
     #[test]
-    fn admin_can_access_admin_methods() {
-        let id = identity_with_roles(&["openshell-admin", "openshell-user"]);
+    fn user_passes_middleware_for_workspace_admin_methods() {
+        let id = identity_with_roles(&["openshell-user"]);
         let policy = default_policy();
         assert!(
             policy
                 .check(&id, "/openshell.v1.OpenShell/CreateProvider")
+                .is_ok()
+        );
+        assert!(
+            policy
+                .check(&id, "/openshell.v1.OpenShell/DeleteProvider")
+                .is_ok()
+        );
+        assert!(
+            policy
+                .check(&id, "/openshell.v1.OpenShell/AddWorkspaceMember")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn admin_can_access_platform_admin_methods() {
+        let id = identity_with_roles(&["openshell-admin", "openshell-user"]);
+        let policy = default_policy();
+        assert!(
+            policy
+                .check(&id, "/openshell.v1.OpenShell/CreateWorkspace")
                 .is_ok()
         );
     }
@@ -253,7 +281,7 @@ mod tests {
         };
         assert!(
             policy
-                .check(&id, "/openshell.v1.OpenShell/CreateProvider")
+                .check(&id, "/openshell.v1.OpenShell/CreateWorkspace")
                 .is_ok()
         );
         assert!(
@@ -408,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_refresh_methods_require_provider_scopes_and_admin_for_writes() {
+    fn provider_refresh_methods_require_provider_scopes() {
         let policy = scoped_policy();
         let reader = identity_with_roles_and_scopes(&["openshell-user"], &["provider:read"]);
         assert!(
@@ -417,17 +445,26 @@ mod tests {
                 .is_ok()
         );
 
-        let writer_without_admin =
-            identity_with_roles_and_scopes(&["openshell-user"], &["provider:write"]);
-        let err = policy
-            .check(
-                &writer_without_admin,
-                "/openshell.v1.OpenShell/ConfigureProviderRefresh",
-            )
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-        assert!(err.message().contains("openshell-admin"));
+        // Workspace-admin methods now pass middleware with user role + correct scope.
+        // Handler enforces workspace membership.
+        let writer = identity_with_roles_and_scopes(&["openshell-user"], &["provider:write"]);
+        assert!(
+            policy
+                .check(&writer, "/openshell.v1.OpenShell/ConfigureProviderRefresh")
+                .is_ok()
+        );
+        assert!(
+            policy
+                .check(&writer, "/openshell.v1.OpenShell/RotateProviderCredential")
+                .is_ok()
+        );
+        assert!(
+            policy
+                .check(&writer, "/openshell.v1.OpenShell/DeleteProviderRefresh")
+                .is_ok()
+        );
 
+        // Wrong scope still rejected.
         let admin_without_scope =
             identity_with_roles_and_scopes(&["openshell-admin"], &["provider:read"]);
         let err = policy
@@ -438,16 +475,6 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
         assert!(err.message().contains("provider:write"));
-
-        let admin_writer =
-            identity_with_roles_and_scopes(&["openshell-admin"], &["provider:write"]);
-        for method in [
-            "/openshell.v1.OpenShell/ConfigureProviderRefresh",
-            "/openshell.v1.OpenShell/RotateProviderCredential",
-            "/openshell.v1.OpenShell/DeleteProviderRefresh",
-        ] {
-            assert!(policy.check(&admin_writer, method).is_ok(), "{method}");
-        }
     }
 
     #[test]
@@ -493,10 +520,16 @@ mod tests {
                 .check(&id, "/openshell.v1.OpenShell/GetProvider")
                 .is_ok()
         );
-        // admin methods still denied by role check
+        // Workspace-admin methods pass middleware with user role.
         assert!(
             policy
                 .check(&id, "/openshell.v1.OpenShell/CreateProvider")
+                .is_ok()
+        );
+        // Platform-admin methods still denied by role check.
+        assert!(
+            policy
+                .check(&id, "/openshell.v1.OpenShell/CreateWorkspace")
                 .is_err()
         );
     }
@@ -507,7 +540,7 @@ mod tests {
         let policy = scoped_policy();
         assert!(
             policy
-                .check(&id, "/openshell.v1.OpenShell/CreateProvider")
+                .check(&id, "/openshell.v1.OpenShell/CreateWorkspace")
                 .is_ok()
         );
         assert!(

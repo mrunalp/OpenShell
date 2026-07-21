@@ -4195,7 +4195,6 @@ dependencies = [
  "openshell-prover",
  "openshell-providers",
  "openshell-router",
- "openshell-server-macros",
  "openshell-supervisor-middleware",
  "openshell-supervisor-middleware-builtins",
  "petname",
