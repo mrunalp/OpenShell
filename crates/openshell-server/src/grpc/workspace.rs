@@ -22,6 +22,8 @@ use prost::Message;
 use tonic::{Request, Response, Status};
 
 use crate::ServerState;
+use crate::auth::principal::Principal;
+use crate::auth::workspace_authz::{AuthGrant, MinWorkspaceRole, authorize_workspace};
 use crate::persistence::{
     DRAFT_CHUNK_OBJECT_TYPE, ObjectLabels, ObjectType, POLICY_OBJECT_TYPE, WriteCondition,
     current_time_ms,
@@ -44,6 +46,40 @@ impl ObjectType for WorkspaceMember {
     fn object_type() -> &'static str {
         "workspace_member"
     }
+}
+
+async fn filter_workspaces_by_membership(
+    state: &Arc<ServerState>,
+    principal: &Principal,
+    workspaces: Vec<Workspace>,
+) -> Result<Vec<Workspace>, Status> {
+    let subject = match principal {
+        Principal::User(u) => {
+            if crate::auth::workspace_authz::is_platform_admin_principal(
+                &u.identity.roles,
+                &state.admin_role,
+            ) {
+                return Ok(workspaces);
+            }
+            &u.identity.subject
+        }
+        Principal::Sandbox(_) => return Ok(workspaces),
+        Principal::Anonymous => return Err(Status::unauthenticated("authentication required")),
+    };
+
+    let mut visible = Vec::new();
+    for ws in workspaces {
+        let ws_name = ws.metadata.as_ref().map_or("", |m| m.name.as_str());
+        let member = state
+            .store
+            .get_message_by_name::<WorkspaceMember>(ws_name, subject)
+            .await
+            .map_err(|e| Status::internal(format!("membership check failed: {e}")))?;
+        if member.is_some() {
+            visible.push(ws);
+        }
+    }
+    Ok(visible)
 }
 
 fn validate_workspace_name(name: &str) -> Result<(), Status> {
@@ -213,10 +249,14 @@ pub(super) async fn handle_get_workspace(
     state: &Arc<ServerState>,
     request: Request<GetWorkspaceRequest>,
 ) -> Result<Response<GetWorkspaceResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let name = request.into_inner().name;
     if name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
     }
+    authorize_workspace(
+        &state.store, &state.admin_role, &principal, &name, MinWorkspaceRole::User,
+    ).await?;
 
     let workspace: Workspace = state
         .store
@@ -234,6 +274,7 @@ pub(super) async fn handle_list_workspaces(
     state: &Arc<ServerState>,
     request: Request<ListWorkspacesRequest>,
 ) -> Result<Response<ListWorkspacesResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
     let limit = clamp_limit(req.limit, 100, MAX_PAGE_SIZE);
 
@@ -250,6 +291,8 @@ pub(super) async fn handle_list_workspaces(
             .await
             .map_err(|e| Status::internal(format!("list workspaces failed: {e}")))?
     };
+
+    let workspaces = filter_workspaces_by_membership(state, &principal, workspaces).await?;
 
     Ok(Response::new(ListWorkspacesResponse { workspaces }))
 }
@@ -412,11 +455,15 @@ pub(super) async fn handle_add_workspace_member(
     state: &Arc<ServerState>,
     request: Request<AddWorkspaceMemberRequest>,
 ) -> Result<Response<AddWorkspaceMemberResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
 
     let workspace = resolve_workspace(&state.store, &req.workspace)
         .await?
         .ensure_active()?;
+    let authz = authorize_workspace(
+        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
+    ).await?;
 
     if req.principal_subject.is_empty() {
         return Err(Status::invalid_argument("principal_subject is required"));
@@ -426,6 +473,11 @@ pub(super) async fn handle_add_workspace_member(
     if role == WorkspaceRole::Unspecified {
         return Err(Status::invalid_argument(
             "role must be USER or ADMIN, not UNSPECIFIED",
+        ));
+    }
+    if role == WorkspaceRole::Admin && authz.grant != AuthGrant::PlatformAdmin {
+        return Err(Status::permission_denied(
+            "only platform admins can assign the workspace admin role",
         ));
     }
 
@@ -504,9 +556,13 @@ pub(super) async fn handle_remove_workspace_member(
     state: &Arc<ServerState>,
     request: Request<RemoveWorkspaceMemberRequest>,
 ) -> Result<Response<RemoveWorkspaceMemberResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
 
     let workspace = resolve_workspace(&state.store, &req.workspace).await?.name;
+    authorize_workspace(
+        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
+    ).await?;
 
     if req.principal_subject.is_empty() {
         return Err(Status::invalid_argument("principal_subject is required"));
@@ -529,9 +585,13 @@ pub(super) async fn handle_list_workspace_members(
     state: &Arc<ServerState>,
     request: Request<ListWorkspaceMembersRequest>,
 ) -> Result<Response<ListWorkspaceMembersResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
 
     let workspace = resolve_workspace(&state.store, &req.workspace).await?.name;
+    authorize_workspace(
+        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
+    ).await?;
 
     let limit = clamp_limit(req.limit, 100, MAX_PAGE_SIZE);
 
@@ -550,7 +610,7 @@ mod tests {
     use openshell_core::proto::datamodel::v1::ObjectMeta;
     use tonic::{Code, Request};
 
-    use crate::grpc::test_support::test_server_state;
+    use crate::grpc::test_support::{authed_request, test_server_state};
 
     #[tokio::test]
     async fn create_workspace_returns_metadata() {
@@ -623,7 +683,7 @@ mod tests {
 
         let resp = handle_get_workspace(
             &state,
-            Request::new(GetWorkspaceRequest {
+            authed_request(GetWorkspaceRequest {
                 name: "fetch-me".to_string(),
             }),
         )
@@ -643,7 +703,7 @@ mod tests {
 
         let err = handle_get_workspace(
             &state,
-            Request::new(GetWorkspaceRequest {
+            authed_request(GetWorkspaceRequest {
                 name: "no-such-ws".to_string(),
             }),
         )
@@ -659,7 +719,7 @@ mod tests {
 
         let err = handle_get_workspace(
             &state,
-            Request::new(GetWorkspaceRequest {
+            authed_request(GetWorkspaceRequest {
                 name: String::new(),
             }),
         )
@@ -877,7 +937,7 @@ mod tests {
 
         let resp = handle_add_workspace_member(
             &state,
-            Request::new(AddWorkspaceMemberRequest {
+            authed_request(AddWorkspaceMemberRequest {
                 workspace: "default".to_string(),
                 principal_subject: "alice@example.com".to_string(),
                 role: WorkspaceRole::Admin.into(),
@@ -893,7 +953,7 @@ mod tests {
 
         handle_add_workspace_member(
             &state,
-            Request::new(AddWorkspaceMemberRequest {
+            authed_request(AddWorkspaceMemberRequest {
                 workspace: "default".to_string(),
                 principal_subject: "bob@example.com".to_string(),
                 role: WorkspaceRole::User.into(),
@@ -904,7 +964,7 @@ mod tests {
 
         let list = handle_list_workspace_members(
             &state,
-            Request::new(ListWorkspaceMembersRequest {
+            authed_request(ListWorkspaceMembersRequest {
                 workspace: "default".to_string(),
                 limit: 100,
                 offset: 0,
@@ -923,7 +983,7 @@ mod tests {
 
         handle_add_workspace_member(
             &state,
-            Request::new(AddWorkspaceMemberRequest {
+            authed_request(AddWorkspaceMemberRequest {
                 workspace: "default".to_string(),
                 principal_subject: "charlie@example.com".to_string(),
                 role: WorkspaceRole::User.into(),
@@ -934,7 +994,7 @@ mod tests {
 
         let resp = handle_remove_workspace_member(
             &state,
-            Request::new(RemoveWorkspaceMemberRequest {
+            authed_request(RemoveWorkspaceMemberRequest {
                 workspace: "default".to_string(),
                 principal_subject: "charlie@example.com".to_string(),
             }),
@@ -946,7 +1006,7 @@ mod tests {
 
         let list = handle_list_workspace_members(
             &state,
-            Request::new(ListWorkspaceMembersRequest {
+            authed_request(ListWorkspaceMembersRequest {
                 workspace: "default".to_string(),
                 limit: 100,
                 offset: 0,
@@ -965,7 +1025,7 @@ mod tests {
 
         handle_add_workspace_member(
             &state,
-            Request::new(AddWorkspaceMemberRequest {
+            authed_request(AddWorkspaceMemberRequest {
                 workspace: "default".to_string(),
                 principal_subject: "dave@example.com".to_string(),
                 role: WorkspaceRole::User.into(),
@@ -976,7 +1036,7 @@ mod tests {
 
         let err = handle_add_workspace_member(
             &state,
-            Request::new(AddWorkspaceMemberRequest {
+            authed_request(AddWorkspaceMemberRequest {
                 workspace: "default".to_string(),
                 principal_subject: "dave@example.com".to_string(),
                 role: WorkspaceRole::Admin.into(),
@@ -1004,7 +1064,7 @@ mod tests {
 
         handle_add_workspace_member(
             &state,
-            Request::new(AddWorkspaceMemberRequest {
+            authed_request(AddWorkspaceMemberRequest {
                 workspace: "cleanup-test".to_string(),
                 principal_subject: "alice@example.com".to_string(),
                 role: WorkspaceRole::Admin.into(),
@@ -1015,7 +1075,7 @@ mod tests {
 
         handle_add_workspace_member(
             &state,
-            Request::new(AddWorkspaceMemberRequest {
+            authed_request(AddWorkspaceMemberRequest {
                 workspace: "cleanup-test".to_string(),
                 principal_subject: "bob@example.com".to_string(),
                 role: WorkspaceRole::User.into(),
@@ -1026,7 +1086,7 @@ mod tests {
 
         let list = handle_list_workspace_members(
             &state,
-            Request::new(ListWorkspaceMembersRequest {
+            authed_request(ListWorkspaceMembersRequest {
                 workspace: "cleanup-test".to_string(),
                 limit: 100,
                 offset: 0,
@@ -1275,7 +1335,7 @@ mod tests {
 
         let resp = handle_list_workspaces(
             &state,
-            Request::new(ListWorkspacesRequest {
+            authed_request(ListWorkspacesRequest {
                 label_selector: "env=staging".to_string(),
                 ..Default::default()
             }),
@@ -1293,7 +1353,7 @@ mod tests {
 
         let empty = handle_list_workspaces(
             &state,
-            Request::new(ListWorkspacesRequest {
+            authed_request(ListWorkspacesRequest {
                 label_selector: "env=production".to_string(),
                 ..Default::default()
             }),

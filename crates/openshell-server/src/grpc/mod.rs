@@ -100,6 +100,19 @@ pub fn persistence_error_to_status(
     }
 }
 
+/// Extract the `Principal` from request extensions, or return `INTERNAL`.
+///
+/// The middleware layer always inserts a `Principal` for authenticated methods,
+/// so a missing principal indicates an internal wiring error rather than a
+/// caller fault.
+pub(crate) fn extract_principal<T>(request: &Request<T>) -> Result<crate::auth::principal::Principal, Status> {
+    request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned()
+        .ok_or_else(|| Status::internal("missing principal"))
+}
+
 // ---------------------------------------------------------------------------
 // Field-level size limits (shared across submodules)
 // ---------------------------------------------------------------------------
@@ -724,6 +737,8 @@ pub mod test_support {
     use std::sync::Arc;
 
     use crate::ServerState;
+    use crate::auth::identity::{Identity, IdentityProvider};
+    use crate::auth::principal::{Principal, UserPrincipal};
     use crate::compute::new_test_runtime;
     use crate::persistence::Store;
     use crate::sandbox_index::SandboxIndex;
@@ -731,6 +746,30 @@ pub mod test_support {
     use crate::supervisor_session::SupervisorSessionRegistry;
     use crate::tracing_bus::TracingLogBus;
     use openshell_core::Config;
+    use tonic::Request;
+
+    /// Wrap a proto message in a `Request` with a dev principal injected.
+    ///
+    /// The dev principal matches the unauthenticated dev user: subject
+    /// `"dev-user"`, roles `["openshell-admin", "openshell-user"]`.
+    /// Since test_server_state() has an empty `admin_role`, authorize_workspace()
+    /// treats every authenticated user as Platform Admin.
+    pub fn authed_request<T>(inner: T) -> Request<T> {
+        let mut req = Request::new(inner);
+        req.extensions_mut().insert(Principal::User(UserPrincipal {
+            identity: Identity {
+                subject: "dev-user".to_string(),
+                display_name: None,
+                roles: vec![
+                    "openshell-admin".to_string(),
+                    "openshell-user".to_string(),
+                ],
+                scopes: vec![],
+                provider: IdentityProvider::Oidc,
+            },
+        }));
+        req
+    }
 
     /// Build an in-memory `ServerState` for unit tests.
     pub async fn test_server_state() -> Arc<ServerState> {

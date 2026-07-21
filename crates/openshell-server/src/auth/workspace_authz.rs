@@ -127,10 +127,33 @@ pub async fn authorize_sandbox_workspace(
     Ok(result.grant)
 }
 
+/// Require Platform Admin status. Used for cross-workspace operations like
+/// `list_*` with `all_workspaces: true`.
+#[allow(clippy::result_large_err)]
+pub fn require_platform_admin(
+    admin_role: &str,
+    principal: &Principal,
+) -> Result<(), Status> {
+    match principal {
+        Principal::User(user) if is_platform_admin(&user.identity.roles, admin_role) => Ok(()),
+        Principal::User(_) => Err(Status::permission_denied(
+            "platform admin role required for cross-workspace operations",
+        )),
+        Principal::Sandbox(_) => Err(Status::permission_denied(
+            "sandbox principals cannot perform cross-workspace operations",
+        )),
+        Principal::Anonymous => Err(Status::unauthenticated("authentication required")),
+    }
+}
+
 /// Check whether the caller's OIDC roles include the platform admin role.
 ///
 /// When `admin_role` is empty (OIDC not configured), returns `true` —
 /// matching the existing behavior where empty role names skip RBAC.
+pub fn is_platform_admin_principal(identity_roles: &[String], admin_role: &str) -> bool {
+    is_platform_admin(identity_roles, admin_role)
+}
+
 fn is_platform_admin(identity_roles: &[String], admin_role: &str) -> bool {
     admin_role.is_empty() || identity_roles.iter().any(|r| r == admin_role)
 }
