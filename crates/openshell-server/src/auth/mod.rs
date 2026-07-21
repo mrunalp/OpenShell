@@ -10,6 +10,7 @@
 
 pub mod authenticator;
 pub mod authz;
+pub mod descriptor_authz;
 pub mod guard;
 mod http;
 pub mod identity;
