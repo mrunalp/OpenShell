@@ -480,6 +480,9 @@ GATEWAY_CONFIG="${STATE_DIR}/gateway.toml"
   printf '[openshell.gateway]\nlog_level = "info"\n\n'
   e2e_write_gateway_jwt_config "${JWT_DIR}" "openshell-e2e-docker-${HOST_PORT}"
   e2e_write_gateway_mtls_auth_config
+  if [ -n "${OPENSHELL_OIDC_ISSUER:-}" ]; then
+    e2e_write_gateway_oidc_config "${OPENSHELL_OIDC_ISSUER}"
+  fi
   printf '[openshell.drivers.docker]\n'
   printf 'sandbox_namespace = %s\n'    "$(toml_string "${E2E_NAMESPACE}")"
   printf 'network_name = %s\n'         "$(toml_string "${DOCKER_NETWORK_NAME}")"
@@ -525,10 +528,16 @@ e2e_register_mtls_gateway \
   "${GATEWAY_NAME}" \
   "${CLI_GATEWAY_ENDPOINT}" \
   "${HOST_PORT}" \
-  "${PKI_DIR}"
+  "${PKI_DIR}" \
+  "${OPENSHELL_OIDC_ISSUER:-}"
 
 export OPENSHELL_GATEWAY="${GATEWAY_NAME}"
 export OPENSHELL_PROVISION_TIMEOUT="${OPENSHELL_PROVISION_TIMEOUT:-180}"
+
+if [ -n "${OPENSHELL_OIDC_ISSUER:-}" ]; then
+  export OPENSHELL_E2E_OIDC=1
+  export OPENSHELL_E2E_OIDC_SCOPES=1
+fi
 
 echo "Waiting for gateway to become healthy..."
 elapsed=0

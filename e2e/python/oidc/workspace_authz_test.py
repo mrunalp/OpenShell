@@ -135,7 +135,9 @@ def _workspace_rpcs() -> list[tuple[str, Callable]]:
             lambda s, m: s.CreateSandbox(
                 openshell_pb2.CreateSandboxRequest(
                     workspace=WS,
-                    spec=datamodel_pb2.SandboxSpec(image="ubuntu:24.04"),
+                    spec=openshell_pb2.SandboxSpec(
+                        template=openshell_pb2.SandboxTemplate(image="ubuntu:24.04")
+                    ),
                 ),
                 metadata=m,
             ),
@@ -207,7 +209,11 @@ def _workspace_rpcs() -> list[tuple[str, Callable]]:
                 openshell_pb2.CreateProviderRequest(
                     workspace=WS,
                     provider=datamodel_pb2.Provider(
-                        name="authz-test", type="claude", credentials={"K": "v"}
+                        metadata=datamodel_pb2.ObjectMeta(
+                            name="authz-test", workspace=WS
+                        ),
+                        type="claude",
+                        credentials={"K": "v"},
                     ),
                 ),
                 metadata=m,
@@ -232,7 +238,11 @@ def _workspace_rpcs() -> list[tuple[str, Callable]]:
                 openshell_pb2.UpdateProviderRequest(
                     workspace=WS,
                     provider=datamodel_pb2.Provider(
-                        name="nonexistent", type="claude", credentials={"K": "v"}
+                        metadata=datamodel_pb2.ObjectMeta(
+                            name="nonexistent", workspace=WS
+                        ),
+                        type="claude",
+                        credentials={"K": "v"},
                     ),
                 ),
                 metadata=m,
@@ -305,7 +315,7 @@ def _workspace_rpcs() -> list[tuple[str, Callable]]:
                 openshell_pb2.ConfigureProviderRefreshRequest(
                     provider="nonexistent",
                     credential_key="k",
-                    strategy="manual",
+                    strategy=openshell_pb2.PROVIDER_CREDENTIAL_REFRESH_STRATEGY_STATIC,
                     workspace=WS,
                 ),
                 metadata=m,
@@ -480,13 +490,13 @@ def _workspace_rpcs() -> list[tuple[str, Callable]]:
     ]
 
 
-_cached_inference_stub: inference_pb2_grpc.InferenceServiceStub | None = None
+_cached_inference_stub: inference_pb2_grpc.InferenceStub | None = None
 
 
-def _inference_stub() -> inference_pb2_grpc.InferenceServiceStub:
+def _inference_stub() -> inference_pb2_grpc.InferenceStub:
     global _cached_inference_stub
     if _cached_inference_stub is None:
-        _cached_inference_stub = inference_pb2_grpc.InferenceServiceStub(grpc_channel())
+        _cached_inference_stub = inference_pb2_grpc.InferenceStub(grpc_channel())
     return _cached_inference_stub
 
 
@@ -542,7 +552,9 @@ class TestWorkspaceAuthorization:
                 openshell_pb2.CreateProviderRequest(
                     workspace=workspace,
                     provider=datamodel_pb2.Provider(
-                        name=prov_name,
+                        metadata=datamodel_pb2.ObjectMeta(
+                            name=prov_name, workspace=workspace
+                        ),
                         type="claude",
                         credentials={"API_KEY": "test"},
                     ),
@@ -642,7 +654,7 @@ class TestWorkspaceAuthorization:
             openshell_pb2.GetProviderRequest(name=seed_provider, workspace=WS),
             metadata=metadata,
         )
-        assert resp.provider.name == seed_provider
+        assert resp.provider.metadata.name == seed_provider
 
     def test_platform_admin_list_services(
         self,
@@ -701,7 +713,7 @@ class TestWorkspaceAuthorization:
                 openshell_pb2.GetProviderRequest(name=seed_provider, workspace=WS),
                 metadata=user_md,
             )
-            assert resp.provider.name == seed_provider
+            assert resp.provider.metadata.name == seed_provider
 
             # ListProviders
             user_stub.ListProviders(
@@ -743,7 +755,9 @@ class TestWorkspaceAuthorization:
                     openshell_pb2.CreateProviderRequest(
                         workspace=WS,
                         provider=datamodel_pb2.Provider(
-                            name="user-blocked",
+                            metadata=datamodel_pb2.ObjectMeta(
+                                name="user-blocked", workspace=WS
+                            ),
                             type="claude",
                             credentials={"K": "v"},
                         ),
@@ -797,7 +811,7 @@ class TestWorkspaceAuthorization:
                 openshell_pb2.CreateProviderRequest(
                     workspace=WS,
                     provider=datamodel_pb2.Provider(
-                        name=prov_name,
+                        metadata=datamodel_pb2.ObjectMeta(name=prov_name, workspace=WS),
                         type="claude",
                         credentials={"K": "v"},
                     ),

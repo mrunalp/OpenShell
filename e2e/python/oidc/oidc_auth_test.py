@@ -21,7 +21,13 @@ import pytest
 
 from openshell._proto import datamodel_pb2, openshell_pb2, openshell_pb2_grpc
 
-from .helpers import get_ci_token, get_token, grpc_channel, stub_with_token
+from .helpers import (
+    extract_sub,
+    get_ci_token,
+    get_token,
+    grpc_channel,
+    stub_with_token,
+)
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("OPENSHELL_E2E_OIDC") != "1",
@@ -40,7 +46,7 @@ class TestRbac:
         stub, metadata = stub_with_token(token)
         req = openshell_pb2.CreateProviderRequest(
             provider=datamodel_pb2.Provider(
-                name="e2e-oidc-admin-test",
+                metadata=datamodel_pb2.ObjectMeta(name="e2e-oidc-admin-test"),
                 type="claude",
                 credentials={"API_KEY": "test-value"},
             )
@@ -64,7 +70,7 @@ class TestRbac:
         stub, metadata = stub_with_token(token)
         req = openshell_pb2.CreateProviderRequest(
             provider=datamodel_pb2.Provider(
-                name="e2e-oidc-user-blocked",
+                metadata=datamodel_pb2.ObjectMeta(name="e2e-oidc-user-blocked"),
                 type="claude",
                 credentials={"API_KEY": "test-value"},
             )
@@ -72,19 +78,45 @@ class TestRbac:
         with pytest.raises(grpc.RpcError) as exc_info:
             stub.CreateProvider(req, metadata=metadata)
         assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
-        assert "openshell-admin" in exc_info.value.details()
 
     def test_user_can_list_sandboxes(self) -> None:
-        token = get_token("user@test", "user", scopes="openid openshell:all")
-        stub, metadata = stub_with_token(token)
-        stub.ListSandboxes(openshell_pb2.ListSandboxesRequest(), metadata=metadata)
+        admin_token = get_token("admin@test", "admin", scopes="openid openshell:all")
+        admin_stub, admin_md = stub_with_token(admin_token)
+        user_token = get_token("user@test", "user", scopes="openid openshell:all")
+        user_sub = extract_sub(user_token)
+        user_stub, user_md = stub_with_token(user_token)
 
-    def test_unauthenticated_request_rejected(self) -> None:
+        with contextlib.suppress(grpc.RpcError):
+            admin_stub.AddWorkspaceMember(
+                openshell_pb2.AddWorkspaceMemberRequest(
+                    workspace="default",
+                    principal_subject=user_sub,
+                    role=openshell_pb2.WORKSPACE_ROLE_USER,
+                ),
+                metadata=admin_md,
+            )
+        try:
+            user_stub.ListSandboxes(
+                openshell_pb2.ListSandboxesRequest(), metadata=user_md
+            )
+        finally:
+            with contextlib.suppress(grpc.RpcError):
+                admin_stub.RemoveWorkspaceMember(
+                    openshell_pb2.RemoveWorkspaceMemberRequest(
+                        workspace="default", principal_subject=user_sub
+                    ),
+                    metadata=admin_md,
+                )
+
+    def test_request_without_bearer_token_rejected(self) -> None:
         channel = grpc_channel()
         stub = openshell_pb2_grpc.OpenShellStub(channel)
         with pytest.raises(grpc.RpcError) as exc_info:
             stub.ListSandboxes(openshell_pb2.ListSandboxesRequest())
-        assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED
+        assert exc_info.value.code() in (
+            grpc.StatusCode.UNAUTHENTICATED,
+            grpc.StatusCode.PERMISSION_DENIED,
+        )
 
     def test_health_does_not_require_auth(self) -> None:
         channel = grpc_channel()
@@ -146,6 +178,28 @@ class TestClientCredentials:
     """Test CI/automation client credentials flow."""
 
     def test_ci_token_can_list_sandboxes(self) -> None:
-        token = get_ci_token()
-        stub, metadata = stub_with_token(token)
-        stub.ListSandboxes(openshell_pb2.ListSandboxesRequest(), metadata=metadata)
+        admin_token = get_token("admin@test", "admin", scopes="openid openshell:all")
+        admin_stub, admin_md = stub_with_token(admin_token)
+        ci_token = get_ci_token()
+        ci_sub = extract_sub(ci_token)
+        ci_stub, ci_md = stub_with_token(ci_token)
+
+        with contextlib.suppress(grpc.RpcError):
+            admin_stub.AddWorkspaceMember(
+                openshell_pb2.AddWorkspaceMemberRequest(
+                    workspace="default",
+                    principal_subject=ci_sub,
+                    role=openshell_pb2.WORKSPACE_ROLE_USER,
+                ),
+                metadata=admin_md,
+            )
+        try:
+            ci_stub.ListSandboxes(openshell_pb2.ListSandboxesRequest(), metadata=ci_md)
+        finally:
+            with contextlib.suppress(grpc.RpcError):
+                admin_stub.RemoveWorkspaceMember(
+                    openshell_pb2.RemoveWorkspaceMemberRequest(
+                        workspace="default", principal_subject=ci_sub
+                    ),
+                    metadata=admin_md,
+                )

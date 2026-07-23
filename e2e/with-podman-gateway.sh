@@ -410,6 +410,9 @@ cp "${ROOT}/deploy/rpm/gateway.toml.default" "${GATEWAY_CONFIG}"
 {
   e2e_write_gateway_jwt_config "${JWT_DIR}" "openshell-e2e-podman-${HOST_PORT}"
   e2e_write_gateway_mtls_auth_config
+  if [ -n "${OPENSHELL_OIDC_ISSUER:-}" ]; then
+    e2e_write_gateway_oidc_config "${OPENSHELL_OIDC_ISSUER}"
+  fi
   printf '\n[openshell.drivers.podman]\n'
   # The Podman driver scopes isolation by network rather than namespace.
   printf 'network_name = %s\n'   "$(toml_string "${PODMAN_NETWORK_NAME}")"
@@ -464,10 +467,16 @@ e2e_register_mtls_gateway \
   "${GATEWAY_NAME}" \
   "${CLI_GATEWAY_ENDPOINT}" \
   "${HOST_PORT}" \
-  "${PKI_DIR}"
+  "${PKI_DIR}" \
+  "${OPENSHELL_OIDC_ISSUER:-}"
 
 export OPENSHELL_GATEWAY="${GATEWAY_NAME}"
 export OPENSHELL_PROVISION_TIMEOUT="${OPENSHELL_PROVISION_TIMEOUT:-300}"
+
+if [ -n "${OPENSHELL_OIDC_ISSUER:-}" ]; then
+  export OPENSHELL_E2E_OIDC=1
+  export OPENSHELL_E2E_OIDC_SCOPES=1
+fi
 
 echo "Waiting for gateway to become healthy..."
 elapsed=0
