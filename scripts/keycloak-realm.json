@@ -313,6 +313,20 @@
       },
       "protocol": "openid-connect",
       "fullScopeAllowed": true,
+      "protocolMappers": [
+        {
+          "name": "openshell-cli audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "openshell-cli",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ],
       "defaultClientScopes": ["openid", "profile", "email", "roles", "web-origins", "acr"],
       "optionalClientScopes": ["sandbox:read", "sandbox:write", "provider:read", "provider:write", "config:read", "config:write", "inference:read", "inference:write", "workspace:read", "workspace:write", "openshell:all"]
     },
@@ -328,6 +342,20 @@
       "serviceAccountsEnabled": true,
       "protocol": "openid-connect",
       "fullScopeAllowed": true,
+      "protocolMappers": [
+        {
+          "name": "openshell-ci audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "openshell-cli",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ],
       "defaultClientScopes": ["openid", "profile", "email", "roles", "web-origins", "acr", "openshell:all"]
     }
   ],
