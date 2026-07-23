@@ -151,8 +151,13 @@ async fn handle_create_sandbox_inner(
         .await?
         .ensure_active()?;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
 
     let _sandbox_sync_guard = if spec.providers.is_empty() {
         None
@@ -270,8 +275,13 @@ pub(super) async fn handle_get_sandbox(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
 
     let sandbox = state
         .store
@@ -320,8 +330,13 @@ pub(super) async fn handle_list_sandboxes(
                 .await?
                 .name;
         authorize_workspace(
-            &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-        ).await?;
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::User,
+        )
+        .await?;
         if request.label_selector.is_empty() {
             state
                 .store
@@ -358,8 +373,13 @@ pub(super) async fn handle_list_sandbox_providers(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
     let sandbox = sandbox_by_name(state, &workspace, &req.sandbox_name).await?;
     let providers = providers_for_sandbox(state, &sandbox, &workspace).await?;
     Ok(Response::new(ListSandboxProvidersResponse { providers }))
@@ -375,8 +395,13 @@ pub(super) async fn handle_attach_sandbox_provider(
         .await?
         .ensure_active()?;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
     if request.provider_name.is_empty() {
         return Err(Status::invalid_argument("provider_name is required"));
     }
@@ -500,8 +525,13 @@ pub(super) async fn handle_detach_sandbox_provider(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
     if request.provider_name.is_empty() {
         return Err(Status::invalid_argument("provider_name is required"));
     }
@@ -603,8 +633,13 @@ async fn handle_delete_sandbox_inner(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
 
     let sandbox_id = state
         .store
@@ -698,9 +733,13 @@ pub(super) async fn handle_watch_sandbox(
         .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
         .ok_or_else(|| Status::not_found("sandbox not found"))?;
     authorize_sandbox_workspace(
-        &state.store, &state.admin_role, &principal,
-        &sandbox.object_workspace(), MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        sandbox.object_workspace(),
+        MinWorkspaceRole::User,
+    )
+    .await?;
 
     let follow_status = req.follow_status;
     let follow_logs = req.follow_logs;
@@ -948,9 +987,13 @@ pub(super) async fn handle_exec_sandbox(
         .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
         .ok_or_else(|| Status::not_found("sandbox not found"))?;
     authorize_sandbox_workspace(
-        &state.store, &state.admin_role, &principal,
-        &sandbox.object_workspace(), MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        sandbox.object_workspace(),
+        MinWorkspaceRole::User,
+    )
+    .await?;
 
     if SandboxPhase::try_from(sandbox.phase()).ok() != Some(SandboxPhase::Ready) {
         return Err(Status::failed_precondition("sandbox is not ready"));
@@ -1067,9 +1110,13 @@ pub(super) async fn handle_forward_tcp(
         .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
         .ok_or_else(|| Status::not_found("sandbox not found"))?;
     authorize_sandbox_workspace(
-        &state.store, &state.admin_role, &principal,
-        &sandbox.object_workspace(), MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        sandbox.object_workspace(),
+        MinWorkspaceRole::User,
+    )
+    .await?;
 
     if SandboxPhase::try_from(sandbox.phase()).ok() != Some(SandboxPhase::Ready) {
         return Err(Status::failed_precondition("sandbox is not ready"));
@@ -1398,9 +1445,13 @@ pub(super) async fn handle_exec_sandbox_interactive(
         .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
         .ok_or_else(|| Status::not_found("sandbox not found"))?;
     authorize_sandbox_workspace(
-        &state.store, &state.admin_role, &principal,
-        &sandbox.object_workspace(), MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        sandbox.object_workspace(),
+        MinWorkspaceRole::User,
+    )
+    .await?;
 
     if SandboxPhase::try_from(sandbox.phase()).ok() != Some(SandboxPhase::Ready) {
         return Err(Status::failed_precondition("sandbox is not ready"));
@@ -1478,9 +1529,13 @@ pub(super) async fn handle_create_ssh_session(
         .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
         .ok_or_else(|| Status::not_found("sandbox not found"))?;
     authorize_sandbox_workspace(
-        &state.store, &state.admin_role, &principal,
-        &sandbox.object_workspace(), MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        sandbox.object_workspace(),
+        MinWorkspaceRole::User,
+    )
+    .await?;
 
     if SandboxPhase::try_from(sandbox.phase()).ok() != Some(SandboxPhase::Ready) {
         return Err(Status::failed_precondition("sandbox is not ready"));
@@ -1575,9 +1630,13 @@ pub(super) async fn handle_revoke_ssh_session(
         return Ok(Response::new(RevokeSshSessionResponse { revoked: false }));
     };
     authorize_sandbox_workspace(
-        &state.store, &state.admin_role, &principal,
-        &session.object_workspace(), MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        session.object_workspace(),
+        MinWorkspaceRole::User,
+    )
+    .await?;
 
     let resource_version = session
         .metadata

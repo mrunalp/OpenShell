@@ -143,9 +143,6 @@ pub async fn resolve_profile_workspace(
 /// carries the workspace's termination state so create-path handlers can reject
 /// operations on workspaces that are being deleted.
 ///
-/// TODO(phase2): this only validates existence. Workspace membership enforcement
-/// (checking the caller is a member of the resolved workspace) is deferred to
-/// Phase 2.
 pub async fn resolve_workspace(
     store: &crate::persistence::Store,
     workspace: &str,
@@ -255,8 +252,13 @@ pub(super) async fn handle_get_workspace(
         return Err(Status::invalid_argument("name is required"));
     }
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &name, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &name,
+        MinWorkspaceRole::User,
+    )
+    .await?;
 
     let workspace: Workspace = state
         .store
@@ -462,8 +464,13 @@ pub(super) async fn handle_add_workspace_member(
         .await?
         .ensure_active()?;
     let authz = authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
 
     if req.principal_subject.is_empty() {
         return Err(Status::invalid_argument("principal_subject is required"));
@@ -561,8 +568,13 @@ pub(super) async fn handle_remove_workspace_member(
 
     let workspace = resolve_workspace(&state.store, &req.workspace).await?.name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
 
     if req.principal_subject.is_empty() {
         return Err(Status::invalid_argument("principal_subject is required"));
@@ -590,8 +602,13 @@ pub(super) async fn handle_list_workspace_members(
 
     let workspace = resolve_workspace(&state.store, &req.workspace).await?.name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
 
     let limit = clamp_limit(req.limit, 100, MAX_PAGE_SIZE);
 

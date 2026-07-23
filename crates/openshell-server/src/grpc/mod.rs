@@ -105,7 +105,9 @@ pub fn persistence_error_to_status(
 /// The middleware layer always inserts a `Principal` for authenticated methods,
 /// so a missing principal indicates an internal wiring error rather than a
 /// caller fault.
-pub(crate) fn extract_principal<T>(request: &Request<T>) -> Result<crate::auth::principal::Principal, Status> {
+pub fn extract_principal<T>(
+    request: &Request<T>,
+) -> Result<crate::auth::principal::Principal, Status> {
     request
         .extensions()
         .get::<crate::auth::principal::Principal>()
@@ -262,9 +264,6 @@ impl OpenShell for OpenShellService {
 
     type WatchSandboxStream = ReceiverStream<Result<SandboxStreamEvent, Status>>;
 
-    // TODO(phase2): data-plane RPCs do not carry a workspace field. Add
-    // workspace verification to confirm the sandbox belongs to the caller's
-    // workspace before proxying.
     async fn watch_sandbox(
         &self,
         request: Request<WatchSandboxRequest>,
@@ -279,8 +278,6 @@ impl OpenShell for OpenShellService {
         sandbox::handle_get_sandbox(&self.state, request).await
     }
 
-    // TODO(phase2): all_workspaces flag is currently accessible to any
-    // authenticated user. Restrict to Platform Admin role in Phase 2.
     async fn list_sandboxes(
         &self,
         request: Request<ListSandboxesRequest>,
@@ -320,7 +317,6 @@ impl OpenShell for OpenShellService {
 
     type ExecSandboxStream = ReceiverStream<Result<ExecSandboxEvent, Status>>;
 
-    // TODO(phase2): no workspace field — see watch_sandbox comment.
     async fn exec_sandbox(
         &self,
         request: Request<ExecSandboxRequest>,
@@ -331,7 +327,6 @@ impl OpenShell for OpenShellService {
     type ForwardTcpStream =
         Pin<Box<dyn tokio_stream::Stream<Item = Result<TcpForwardFrame, Status>> + Send + 'static>>;
 
-    // TODO(phase2): no workspace field — see watch_sandbox comment.
     async fn forward_tcp(
         &self,
         request: Request<tonic::Streaming<TcpForwardFrame>>,
@@ -350,7 +345,6 @@ impl OpenShell for OpenShellService {
 
     // --- SSH sessions ---
 
-    // TODO(phase2): no workspace field — see watch_sandbox comment.
     async fn create_ssh_session(
         &self,
         request: Request<CreateSshSessionRequest>,
@@ -372,8 +366,6 @@ impl OpenShell for OpenShellService {
         service::handle_get_service(&self.state, request).await
     }
 
-    // TODO(phase2): all_workspaces flag is currently accessible to any
-    // authenticated user. Restrict to Platform Admin role in Phase 2.
     async fn list_services(
         &self,
         request: Request<ListServicesRequest>,
@@ -411,8 +403,6 @@ impl OpenShell for OpenShellService {
         provider::handle_get_provider(&self.state, request).await
     }
 
-    // TODO(phase2): all_workspaces flag is currently accessible to any
-    // authenticated user. Restrict to Platform Admin role in Phase 2.
     async fn list_providers(
         &self,
         request: Request<ListProvidersRequest>,
@@ -752,7 +742,7 @@ pub mod test_support {
     ///
     /// The dev principal matches the unauthenticated dev user: subject
     /// `"dev-user"`, roles `["openshell-admin", "openshell-user"]`.
-    /// Since test_server_state() has an empty `admin_role`, authorize_workspace()
+    /// Since `test_server_state()` has an empty `admin_role`, `authorize_workspace()`
     /// treats every authenticated user as Platform Admin.
     pub fn authed_request<T>(inner: T) -> Request<T> {
         let mut req = Request::new(inner);
@@ -760,10 +750,7 @@ pub mod test_support {
             identity: Identity {
                 subject: "dev-user".to_string(),
                 display_name: None,
-                roles: vec![
-                    "openshell-admin".to_string(),
-                    "openshell-user".to_string(),
-                ],
+                roles: vec!["openshell-admin".to_string(), "openshell-user".to_string()],
                 scopes: vec![],
                 provider: IdentityProvider::Oidc,
             },

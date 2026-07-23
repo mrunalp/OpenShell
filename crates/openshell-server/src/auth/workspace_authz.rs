@@ -8,8 +8,6 @@
 //! auth mode + scope + global role; this module validates workspace membership
 //! and workspace-level role.
 
-#![allow(dead_code)]
-
 use super::principal::Principal;
 use openshell_core::proto::WorkspaceRole as ProtoWorkspaceRole;
 use tonic::Status;
@@ -29,6 +27,7 @@ pub enum MinWorkspaceRole {
 #[derive(Debug)]
 pub struct AuthorizedWorkspace {
     /// Resolved workspace name (empty string normalized to `"default"`).
+    #[allow(dead_code)]
     pub workspace: String,
     /// How the caller was authorized.
     pub grant: AuthGrant,
@@ -130,10 +129,7 @@ pub async fn authorize_sandbox_workspace(
 /// Require Platform Admin status. Used for cross-workspace operations like
 /// `list_*` with `all_workspaces: true`.
 #[allow(clippy::result_large_err)]
-pub fn require_platform_admin(
-    admin_role: &str,
-    principal: &Principal,
-) -> Result<(), Status> {
+pub fn require_platform_admin(admin_role: &str, principal: &Principal) -> Result<(), Status> {
     match principal {
         Principal::User(user) if is_platform_admin(&user.identity.roles, admin_role) => Ok(()),
         Principal::User(_) => Err(Status::permission_denied(
