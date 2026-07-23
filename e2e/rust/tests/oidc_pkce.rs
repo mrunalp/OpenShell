@@ -9,7 +9,7 @@
 //! captured Keycloak login URL with curl. This exercises the same loopback
 //! callback and token exchange used by a real browser without requiring a GUI.
 //! It logs in as both fixture users and verifies standard-user and admin-only
-//! actions against a live Podman-backed gateway.
+//! actions against a live Docker- or Podman-backed gateway.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -110,9 +110,12 @@ async fn admin_can_inspect_gateway() {
     let session = login_identity(ADMIN).await;
     let output = assert_allowed(&session, &["gateway", "info"], "inspect gateway info").await;
     let info = combined_output(&output);
+    let expected_driver =
+        std::env::var("OPENSHELL_E2E_DRIVER").expect("OIDC E2E requires OPENSHELL_E2E_DRIVER");
     assert!(
-        info.to_ascii_lowercase().contains("podman"),
-        "gateway info should report the Podman compute driver: {info}"
+        info.to_ascii_lowercase()
+            .contains(&expected_driver.to_ascii_lowercase()),
+        "gateway info should report the {expected_driver} compute driver: {info}"
     );
 }
 
