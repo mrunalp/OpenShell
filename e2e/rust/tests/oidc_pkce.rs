@@ -25,42 +25,197 @@ use serde_json::Value;
 use tokio::process::Command;
 use url::Url;
 
+#[derive(Clone, Copy)]
 struct IdentityScenario {
     gateway_name: &'static str,
     username: &'static str,
     password: &'static str,
     expected_role: &'static str,
-    is_admin: bool,
+}
+
+const ADMIN: IdentityScenario = IdentityScenario {
+    gateway_name: "oidc-pkce-admin",
+    username: "admin@test",
+    password: "admin",
+    expected_role: "openshell-admin",
+};
+
+const USER: IdentityScenario = IdentityScenario {
+    gateway_name: "oidc-pkce-user",
+    username: "user@test",
+    password: "user",
+    expected_role: "openshell-user",
+};
+
+struct LoginSession {
+    config_home: tempfile::TempDir,
+    identity: IdentityScenario,
 }
 
 #[tokio::test]
-async fn browser_pkce_enforces_admin_and_user_actions() {
+async fn admin_can_list_sandboxes() {
+    let session = login_identity(ADMIN).await;
+    assert_allowed(
+        &session,
+        &["sandbox", "list", "--output", "json"],
+        "list sandboxes",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn user_can_list_sandboxes() {
+    let session = login_identity(USER).await;
+    assert_allowed(
+        &session,
+        &["sandbox", "list", "--output", "json"],
+        "list sandboxes",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn admin_can_inspect_gateway() {
+    let session = login_identity(ADMIN).await;
+    let output = assert_allowed(&session, &["gateway", "info"], "inspect gateway info").await;
+    let info = combined_output(&output);
+    assert!(
+        info.to_ascii_lowercase().contains("podman"),
+        "gateway info should report the Podman compute driver: {info}"
+    );
+}
+
+#[tokio::test]
+async fn user_cannot_inspect_gateway() {
+    let session = login_identity(USER).await;
+    let output = run_session_cli(&session, &["gateway", "info"]).await;
+    let denied = combined_output(&output);
+    assert!(
+        !output.status.success(),
+        "user accessed gateway info:\n{denied}"
+    );
+    assert!(
+        denied.contains("requires admin privileges"),
+        "gateway-info denial should explain that admin privileges are required:\n{denied}"
+    );
+    assert_admin_role_denial(&output, "inspect gateway info");
+}
+
+#[tokio::test]
+async fn admin_can_list_providers() {
+    let session = login_identity(ADMIN).await;
+    assert_allowed(
+        &session,
+        &["provider", "list", "--output", "json"],
+        "list providers",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn user_can_list_providers() {
+    let session = login_identity(USER).await;
+    assert_allowed(
+        &session,
+        &["provider", "list", "--output", "json"],
+        "list providers",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn admin_can_manage_provider() {
+    const PROVIDER: &str = "oidc-pkce-admin-provider";
+    let session = login_identity(ADMIN).await;
+
+    assert_allowed(
+        &session,
+        &[
+            "provider",
+            "create",
+            "--name",
+            PROVIDER,
+            "--type",
+            "generic",
+            "--credential",
+            "TOKEN=e2e-test-value",
+        ],
+        "create a provider",
+    )
+    .await;
+
+    let get = assert_allowed(&session, &["provider", "get", PROVIDER], "read a provider").await;
+    assert!(
+        combined_output(&get).contains(PROVIDER),
+        "provider get output should contain the created provider:\n{}",
+        combined_output(&get)
+    );
+
+    assert_allowed(
+        &session,
+        &["provider", "delete", PROVIDER],
+        "delete a provider",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn user_cannot_create_provider() {
+    let session = login_identity(USER).await;
+    let output = run_session_cli(
+        &session,
+        &[
+            "provider",
+            "create",
+            "--name",
+            "oidc-pkce-user-provider",
+            "--type",
+            "generic",
+            "--credential",
+            "TOKEN=e2e-test-value",
+        ],
+    )
+    .await;
+    assert_admin_role_denial(&output, "create a provider");
+}
+
+#[tokio::test]
+async fn user_cannot_delete_provider() {
+    const PROVIDER: &str = "oidc-pkce-user-delete-target";
+    let admin = login_identity(ADMIN).await;
+    assert_allowed(
+        &admin,
+        &[
+            "provider",
+            "create",
+            "--name",
+            PROVIDER,
+            "--type",
+            "generic",
+            "--credential",
+            "TOKEN=e2e-test-value",
+        ],
+        "create the provider deletion target",
+    )
+    .await;
+
+    let user = login_identity(USER).await;
+    let denied = run_session_cli(&user, &["provider", "delete", PROVIDER]).await;
+    assert_admin_role_denial(&denied, "delete a provider");
+
+    assert_allowed(
+        &admin,
+        &["provider", "delete", PROVIDER],
+        "clean up the provider deletion target",
+    )
+    .await;
+}
+
+async fn login_identity(identity: IdentityScenario) -> LoginSession {
     let issuer = std::env::var("OPENSHELL_E2E_OIDC_ISSUER")
         .unwrap_or_else(|_| "http://localhost:8180/realms/openshell".to_string());
     let gateway_endpoint = std::env::var("OPENSHELL_E2E_OIDC_GATEWAY_ENDPOINT")
         .expect("OIDC E2E requires a live gateway endpoint");
-
-    for scenario in [
-        IdentityScenario {
-            gateway_name: "oidc-pkce-admin",
-            username: "admin@test",
-            password: "admin",
-            expected_role: "openshell-admin",
-            is_admin: true,
-        },
-        IdentityScenario {
-            gateway_name: "oidc-pkce-user",
-            username: "user@test",
-            password: "user",
-            expected_role: "openshell-user",
-            is_admin: false,
-        },
-    ] {
-        run_identity_scenario(&issuer, &gateway_endpoint, &scenario).await;
-    }
-}
-
-async fn run_identity_scenario(issuer: &str, gateway_endpoint: &str, scenario: &IdentityScenario) {
     let temp = tempfile::tempdir().expect("create isolated test directory");
     let fake_bin = temp.path().join("bin");
     std::fs::create_dir(&fake_bin).expect("create fake bin directory");
@@ -72,12 +227,12 @@ async fn run_identity_scenario(issuer: &str, gateway_endpoint: &str, scenario: &
     cli.args([
         "gateway",
         "add",
-        gateway_endpoint,
+        &gateway_endpoint,
         "--name",
-        scenario.gateway_name,
+        identity.gateway_name,
         "--local",
         "--oidc-issuer",
-        issuer,
+        &issuer,
         "--oidc-scopes",
         "profile email openshell:all",
     ])
@@ -95,7 +250,7 @@ async fn run_identity_scenario(issuer: &str, gateway_endpoint: &str, scenario: &
 
     let child = cli.spawn().expect("start openshell PKCE login");
     let authorization_url = wait_for_browser_url(&browser_url_file).await;
-    let redirect_uri = assert_pkce_authorization_url(&authorization_url, issuer);
+    let redirect_uri = assert_pkce_authorization_url(&authorization_url, &issuer);
 
     let cookie_jar = temp.path().join("keycloak-cookies");
     let login_page = curl_get(&authorization_url, &cookie_jar).await;
@@ -103,8 +258,8 @@ async fn run_identity_scenario(issuer: &str, gateway_endpoint: &str, scenario: &
     let callback_page = curl_login(
         &login_action,
         &cookie_jar,
-        scenario.username,
-        scenario.password,
+        identity.username,
+        identity.password,
     )
     .await;
     assert!(
@@ -132,14 +287,17 @@ async fn run_identity_scenario(issuer: &str, gateway_endpoint: &str, scenario: &
 
     assert_persisted_login(
         temp.path(),
-        issuer,
+        &issuer,
         &redirect_uri,
-        scenario.gateway_name,
-        scenario.username,
-        scenario.expected_role,
+        identity.gateway_name,
+        identity.username,
+        identity.expected_role,
     );
-    assert_gateway_actions(temp.path(), scenario).await;
-    assert_provider_actions(temp.path(), scenario).await;
+
+    LoginSession {
+        config_home: temp,
+        identity,
+    }
 }
 
 fn install_xdg_open_recorder(bin_dir: &Path) {
@@ -357,161 +515,22 @@ fn assert_persisted_login(
     assert_eq!(redirect.host_str(), Some("127.0.0.1"));
 }
 
-async fn assert_gateway_actions(config_home: &Path, scenario: &IdentityScenario) {
-    let list = run_cli(
-        config_home,
-        &[
-            "--gateway",
-            scenario.gateway_name,
-            "sandbox",
-            "list",
-            "--output",
-            "json",
-        ],
-    )
-    .await;
+async fn assert_allowed(session: &LoginSession, args: &[&str], action: &str) -> Output {
+    let output = run_session_cli(session, args).await;
     assert!(
-        list.status.success(),
-        "{} should be allowed to list sandboxes:\n{}",
-        scenario.username,
-        combined_output(&list)
+        output.status.success(),
+        "{} should be allowed to {action}:\n{}",
+        session.identity.username,
+        combined_output(&output)
     );
-
-    let gateway_info = run_cli(
-        config_home,
-        &["--gateway", scenario.gateway_name, "gateway", "info"],
-    )
-    .await;
-
-    if scenario.is_admin {
-        assert!(
-            gateway_info.status.success(),
-            "admin should be allowed to inspect gateway info:\n{}",
-            combined_output(&gateway_info)
-        );
-        let info = combined_output(&gateway_info);
-        assert!(
-            info.to_ascii_lowercase().contains("podman"),
-            "gateway info should report the Podman compute driver: {info}"
-        );
-    } else {
-        assert!(
-            !gateway_info.status.success(),
-            "standard user unexpectedly accessed admin-only gateway info:\n{}",
-            combined_output(&gateway_info)
-        );
-        let denied = combined_output(&gateway_info);
-        let compact_denial: String = denied
-            .chars()
-            .filter(|character| !character.is_whitespace() && *character != '│')
-            .collect();
-        assert!(
-            denied.contains("requires admin privileges")
-                && compact_denial.contains("openshell-admin"),
-            "standard user denial did not identify the required admin role:\n{denied}"
-        );
-    }
+    output
 }
 
-async fn assert_provider_actions(config_home: &Path, scenario: &IdentityScenario) {
-    let provider_name = if scenario.is_admin {
-        "oidc-pkce-admin-provider"
-    } else {
-        "oidc-pkce-user-provider"
-    };
-
-    let list = run_cli(
-        config_home,
-        &[
-            "--gateway",
-            scenario.gateway_name,
-            "provider",
-            "list",
-            "--output",
-            "json",
-        ],
-    )
-    .await;
-    assert!(
-        list.status.success(),
-        "{} should be allowed to list providers:\n{}",
-        scenario.username,
-        combined_output(&list)
-    );
-
-    let create = run_cli(
-        config_home,
-        &[
-            "--gateway",
-            scenario.gateway_name,
-            "provider",
-            "create",
-            "--name",
-            provider_name,
-            "--type",
-            "generic",
-            "--credential",
-            "TOKEN=e2e-test-value",
-        ],
-    )
-    .await;
-
-    if scenario.is_admin {
-        assert!(
-            create.status.success(),
-            "admin should be allowed to create providers:\n{}",
-            combined_output(&create)
-        );
-
-        let get = run_cli(
-            config_home,
-            &[
-                "--gateway",
-                scenario.gateway_name,
-                "provider",
-                "get",
-                provider_name,
-            ],
-        )
-        .await;
-        assert!(
-            get.status.success() && combined_output(&get).contains(provider_name),
-            "admin should be able to read the created provider:\n{}",
-            combined_output(&get)
-        );
-
-        let delete = run_cli(
-            config_home,
-            &[
-                "--gateway",
-                scenario.gateway_name,
-                "provider",
-                "delete",
-                provider_name,
-            ],
-        )
-        .await;
-        assert!(
-            delete.status.success(),
-            "admin should be allowed to delete providers:\n{}",
-            combined_output(&delete)
-        );
-    } else {
-        assert_admin_role_denial(&create, "create a provider");
-
-        let delete = run_cli(
-            config_home,
-            &[
-                "--gateway",
-                scenario.gateway_name,
-                "provider",
-                "delete",
-                provider_name,
-            ],
-        )
-        .await;
-        assert_admin_role_denial(&delete, "delete a provider");
-    }
+async fn run_session_cli(session: &LoginSession, args: &[&str]) -> Output {
+    let mut command_args = Vec::with_capacity(args.len() + 2);
+    command_args.extend(["--gateway", session.identity.gateway_name]);
+    command_args.extend_from_slice(args);
+    run_cli(session.config_home.path(), &command_args).await
 }
 
 fn assert_admin_role_denial(output: &Output, action: &str) {
