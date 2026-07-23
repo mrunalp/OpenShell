@@ -53,6 +53,7 @@ const USER: IdentityScenario = IdentityScenario {
 struct LoginSession {
     config_home: tempfile::TempDir,
     identity: IdentityScenario,
+    subject: String,
 }
 
 #[tokio::test]
@@ -68,41 +69,54 @@ async fn admin_can_list_sandboxes() {
 
 #[tokio::test]
 async fn user_can_list_sandboxes() {
-    let session = login_identity(USER).await;
-    assert_allowed(
-        &session,
+    const WORKSPACE: &str = "oidc-user-list-sb";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "user").await;
+    assert_workspace_allowed(
+        &user,
+        WORKSPACE,
         &["sandbox", "list", "--output", "json"],
         "list sandboxes",
     )
     .await;
+    delete_workspace(&admin, WORKSPACE).await;
 }
 
 #[tokio::test]
 async fn admin_can_create_sandbox() {
     let session = login_identity(ADMIN).await;
     let _lifecycle = SANDBOX_LIFECYCLE_LOCK.lock().await;
-    assert_can_create_sandbox(&session, "oidc-admin-create").await;
+    assert_can_create_sandbox(&session, "default", "oidc-admin-create").await;
 }
 
 #[tokio::test]
 async fn user_can_create_sandbox() {
-    let session = login_identity(USER).await;
+    const WORKSPACE: &str = "oidc-user-create";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "user").await;
     let _lifecycle = SANDBOX_LIFECYCLE_LOCK.lock().await;
-    assert_can_create_sandbox(&session, "oidc-user-create").await;
+    assert_can_create_sandbox(&user, WORKSPACE, "oidc-user-create").await;
+    delete_workspace(&admin, WORKSPACE).await;
 }
 
 #[tokio::test]
 async fn admin_can_delete_sandbox() {
     let session = login_identity(ADMIN).await;
     let _lifecycle = SANDBOX_LIFECYCLE_LOCK.lock().await;
-    assert_can_delete_sandbox(&session, "oidc-admin-delete").await;
+    assert_can_delete_sandbox(&session, "default", "oidc-admin-delete").await;
 }
 
 #[tokio::test]
 async fn user_can_delete_sandbox() {
-    let session = login_identity(USER).await;
+    const WORKSPACE: &str = "oidc-user-delete";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "user").await;
     let _lifecycle = SANDBOX_LIFECYCLE_LOCK.lock().await;
-    assert_can_delete_sandbox(&session, "oidc-user-delete").await;
+    assert_can_delete_sandbox(&user, WORKSPACE, "oidc-user-delete").await;
+    delete_workspace(&admin, WORKSPACE).await;
 }
 
 #[tokio::test]
@@ -148,13 +162,18 @@ async fn admin_can_list_providers() {
 
 #[tokio::test]
 async fn user_can_list_providers() {
-    let session = login_identity(USER).await;
-    assert_allowed(
-        &session,
+    const WORKSPACE: &str = "oidc-user-list-pr";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "user").await;
+    assert_workspace_allowed(
+        &user,
+        WORKSPACE,
         &["provider", "list", "--output", "json"],
         "list providers",
     )
     .await;
+    delete_workspace(&admin, WORKSPACE).await;
 }
 
 #[tokio::test]
@@ -195,9 +214,13 @@ async fn admin_can_manage_provider() {
 
 #[tokio::test]
 async fn user_cannot_create_provider() {
-    let session = login_identity(USER).await;
-    let output = run_session_cli(
-        &session,
+    const WORKSPACE: &str = "oidc-user-no-create";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "user").await;
+    let output = run_workspace_cli(
+        &user,
+        WORKSPACE,
         &[
             "provider",
             "create",
@@ -210,15 +233,20 @@ async fn user_cannot_create_provider() {
         ],
     )
     .await;
-    assert_admin_role_denial(&output, "create a provider");
+    assert_workspace_admin_denial(&output, "create a provider");
+    delete_workspace(&admin, WORKSPACE).await;
 }
 
 #[tokio::test]
 async fn user_cannot_delete_provider() {
     const PROVIDER: &str = "oidc-pkce-user-delete-target";
+    const WORKSPACE: &str = "oidc-user-no-delete";
+    let user = login_identity(USER).await;
     let admin = login_identity(ADMIN).await;
-    assert_allowed(
+    prepare_workspace(&admin, &user, WORKSPACE, "user").await;
+    assert_workspace_allowed(
         &admin,
+        WORKSPACE,
         &[
             "provider",
             "create",
@@ -233,16 +261,219 @@ async fn user_cannot_delete_provider() {
     )
     .await;
 
-    let user = login_identity(USER).await;
-    let denied = run_session_cli(&user, &["provider", "delete", PROVIDER]).await;
-    assert_admin_role_denial(&denied, "delete a provider");
+    let denied = run_workspace_cli(&user, WORKSPACE, &["provider", "delete", PROVIDER]).await;
+    assert_workspace_admin_denial(&denied, "delete a provider");
 
-    assert_allowed(
+    assert_workspace_allowed(
         &admin,
+        WORKSPACE,
         &["provider", "delete", PROVIDER],
         "clean up the provider deletion target",
     )
     .await;
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn admin_can_create_workspace() {
+    const WORKSPACE: &str = "oidc-admin-create";
+    let admin = login_identity(ADMIN).await;
+    let _ = run_session_cli(&admin, &["workspace", "delete", WORKSPACE]).await;
+    assert_allowed(
+        &admin,
+        &["workspace", "create", "--name", WORKSPACE],
+        "create a workspace",
+    )
+    .await;
+    let get = assert_allowed(
+        &admin,
+        &["workspace", "get", WORKSPACE],
+        "read the created workspace",
+    )
+    .await;
+    assert!(combined_output(&get).contains(WORKSPACE));
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn user_cannot_create_workspace() {
+    let user = login_identity(USER).await;
+    let denied = run_session_cli(
+        &user,
+        &["workspace", "create", "--name", "oidc-user-denied"],
+    )
+    .await;
+    assert_admin_role_denial(&denied, "create a workspace");
+}
+
+#[tokio::test]
+async fn admin_can_delete_workspace() {
+    const WORKSPACE: &str = "oidc-admin-delete";
+    let admin = login_identity(ADMIN).await;
+    let _ = run_session_cli(&admin, &["workspace", "delete", WORKSPACE]).await;
+    assert_allowed(
+        &admin,
+        &["workspace", "create", "--name", WORKSPACE],
+        "create a workspace deletion target",
+    )
+    .await;
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn user_cannot_delete_workspace() {
+    const WORKSPACE: &str = "oidc-user-del-deny";
+    let admin = login_identity(ADMIN).await;
+    let user = login_identity(USER).await;
+    let _ = run_session_cli(&admin, &["workspace", "delete", WORKSPACE]).await;
+    assert_allowed(
+        &admin,
+        &["workspace", "create", "--name", WORKSPACE],
+        "create a workspace deletion target",
+    )
+    .await;
+    let denied = run_session_cli(&user, &["workspace", "delete", WORKSPACE]).await;
+    assert_admin_role_denial(&denied, "delete a workspace");
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_user_can_read_workspace() {
+    const WORKSPACE: &str = "oidc-ws-user-read";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "user").await;
+
+    let get = assert_allowed(
+        &user,
+        &["workspace", "get", WORKSPACE],
+        "read a member workspace",
+    )
+    .await;
+    let list = assert_allowed(
+        &user,
+        &["workspace", "list", "--output", "json"],
+        "list member workspaces",
+    )
+    .await;
+    let members = assert_allowed(
+        &user,
+        &["workspace", "member", "list", "--workspace", WORKSPACE],
+        "list workspace members",
+    )
+    .await;
+    assert!(combined_output(&get).contains(WORKSPACE));
+    assert!(combined_output(&list).contains(WORKSPACE));
+    assert!(combined_output(&members).contains(&user.subject));
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_user_cannot_manage_members() {
+    const WORKSPACE: &str = "oidc-ws-user-deny";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "user").await;
+    let denied = run_session_cli(
+        &user,
+        &[
+            "workspace",
+            "member",
+            "add",
+            "--workspace",
+            WORKSPACE,
+            "--subject",
+            "oidc-fake-member",
+            "--role",
+            "user",
+        ],
+    )
+    .await;
+    assert_workspace_admin_denial(&denied, "add a workspace member");
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_can_manage_provider() {
+    const WORKSPACE: &str = "oidc-ws-admin-prov";
+    const PROVIDER: &str = "oidc-ws-admin-provider";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "admin").await;
+    assert_workspace_allowed(
+        &user,
+        WORKSPACE,
+        &[
+            "provider",
+            "create",
+            "--name",
+            PROVIDER,
+            "--type",
+            "generic",
+            "--credential",
+            "TOKEN=e2e-test-value",
+        ],
+        "create a provider as workspace admin",
+    )
+    .await;
+    assert_workspace_allowed(
+        &user,
+        WORKSPACE,
+        &["provider", "delete", PROVIDER],
+        "delete a provider as workspace admin",
+    )
+    .await;
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_cannot_grant_admin() {
+    const WORKSPACE: &str = "oidc-ws-admin-deny";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "admin").await;
+    let denied = run_session_cli(
+        &user,
+        &[
+            "workspace",
+            "member",
+            "add",
+            "--workspace",
+            WORKSPACE,
+            "--subject",
+            "oidc-fake-admin",
+            "--role",
+            "admin",
+        ],
+    )
+    .await;
+    assert_platform_admin_denial(&denied, "grant workspace admin");
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn membership_removal_revokes_workspace_access() {
+    const WORKSPACE: &str = "oidc-ws-revoke";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "user").await;
+    assert_allowed(
+        &admin,
+        &[
+            "workspace",
+            "member",
+            "remove",
+            "--workspace",
+            WORKSPACE,
+            "--subject",
+            &user.subject,
+        ],
+        "remove a workspace member",
+    )
+    .await;
+    let denied = run_session_cli(&user, &["workspace", "get", WORKSPACE]).await;
+    assert_non_member_denial(&denied, "read a workspace after membership removal");
+    delete_workspace(&admin, WORKSPACE).await;
 }
 
 async fn login_identity(identity: IdentityScenario) -> LoginSession {
@@ -319,7 +550,7 @@ async fn login_identity(identity: IdentityScenario) -> LoginSession {
         "missing successful authentication message:\n{combined}"
     );
 
-    assert_persisted_login(
+    let subject = assert_persisted_login(
         temp.path(),
         &issuer,
         &redirect_uri,
@@ -331,6 +562,7 @@ async fn login_identity(identity: IdentityScenario) -> LoginSession {
     LoginSession {
         config_home: temp,
         identity,
+        subject,
     }
 }
 
@@ -509,7 +741,7 @@ fn assert_persisted_login(
     gateway_name: &str,
     username: &str,
     expected_role: &str,
-) {
+) -> String {
     let gateway_dir = config_home
         .join("openshell")
         .join("gateways")
@@ -538,6 +770,11 @@ fn assert_persisted_login(
     assert!(jwt_audience_contains(&claims["aud"], "openshell-cli"));
     assert_eq!(claims["azp"], "openshell-cli");
     assert_eq!(claims["preferred_username"], username);
+    let subject = claims["sub"]
+        .as_str()
+        .filter(|subject| !subject.is_empty())
+        .expect("access token should contain a non-empty subject")
+        .to_string();
     assert!(
         claims["realm_access"]["roles"]
             .as_array()
@@ -547,6 +784,7 @@ fn assert_persisted_login(
 
     let redirect = Url::parse(redirect_uri).expect("saved redirect URI remains valid");
     assert_eq!(redirect.host_str(), Some("127.0.0.1"));
+    subject
 }
 
 async fn assert_allowed(session: &LoginSession, args: &[&str], action: &str) -> Output {
@@ -560,10 +798,67 @@ async fn assert_allowed(session: &LoginSession, args: &[&str], action: &str) -> 
     output
 }
 
-async fn assert_can_create_sandbox(session: &LoginSession, sandbox_name: &str) {
+async fn assert_workspace_allowed(
+    session: &LoginSession,
+    workspace: &str,
+    args: &[&str],
+    action: &str,
+) -> Output {
+    let output = run_workspace_cli(session, workspace, args).await;
+    assert!(
+        output.status.success(),
+        "{} should be allowed to {action} in workspace {workspace}:\n{}",
+        session.identity.username,
+        combined_output(&output)
+    );
+    output
+}
+
+async fn prepare_workspace(
+    admin: &LoginSession,
+    member: &LoginSession,
+    workspace: &str,
+    role: &str,
+) {
+    let _ = run_session_cli(admin, &["workspace", "delete", workspace]).await;
+    assert_allowed(
+        admin,
+        &["workspace", "create", "--name", workspace],
+        "create a workspace fixture",
+    )
+    .await;
+    assert_allowed(
+        admin,
+        &[
+            "workspace",
+            "member",
+            "add",
+            "--workspace",
+            workspace,
+            "--subject",
+            &member.subject,
+            "--role",
+            role,
+        ],
+        "add a workspace member",
+    )
+    .await;
+}
+
+async fn delete_workspace(admin: &LoginSession, workspace: &str) {
+    assert_allowed(
+        admin,
+        &["workspace", "delete", workspace],
+        "delete a workspace",
+    )
+    .await;
+}
+
+async fn assert_can_create_sandbox(session: &LoginSession, workspace: &str, sandbox_name: &str) {
     let marker = format!("{sandbox_name}-ready");
-    let create = run_session_cli(
+    let create = run_workspace_cli(
         session,
+        workspace,
         &[
             "sandbox",
             "create",
@@ -579,16 +874,17 @@ async fn assert_can_create_sandbox(session: &LoginSession, sandbox_name: &str) {
     let create_output = combined_output(&create);
 
     if !create.status.success() {
-        let _ = run_session_cli(session, &["sandbox", "delete", sandbox_name]).await;
+        let _ = run_workspace_cli(session, workspace, &["sandbox", "delete", sandbox_name]).await;
         panic!(
             "{} should be allowed to create sandbox {sandbox_name}:\n{create_output}",
             session.identity.username
         );
     }
 
-    let list = run_session_cli(session, &["sandbox", "list", "--output", "json"]).await;
+    let list =
+        run_workspace_cli(session, workspace, &["sandbox", "list", "--output", "json"]).await;
     let list_output = combined_output(&list);
-    let cleanup = run_session_cli(session, &["sandbox", "delete", sandbox_name]).await;
+    let cleanup = run_workspace_cli(session, workspace, &["sandbox", "delete", sandbox_name]).await;
 
     assert!(
         create_output.contains(&marker),
@@ -605,10 +901,11 @@ async fn assert_can_create_sandbox(session: &LoginSession, sandbox_name: &str) {
     );
 }
 
-async fn assert_can_delete_sandbox(session: &LoginSession, sandbox_name: &str) {
+async fn assert_can_delete_sandbox(session: &LoginSession, workspace: &str, sandbox_name: &str) {
     let marker = format!("{sandbox_name}-ready");
-    let create = run_session_cli(
+    let create = run_workspace_cli(
         session,
+        workspace,
         &[
             "sandbox",
             "create",
@@ -623,21 +920,21 @@ async fn assert_can_delete_sandbox(session: &LoginSession, sandbox_name: &str) {
     .await;
     let create_output = combined_output(&create);
     if !create.status.success() {
-        let _ = run_session_cli(session, &["sandbox", "delete", sandbox_name]).await;
+        let _ = run_workspace_cli(session, workspace, &["sandbox", "delete", sandbox_name]).await;
         panic!("failed to create sandbox deletion target {sandbox_name}:\n{create_output}");
     }
 
-    let delete = run_session_cli(session, &["sandbox", "delete", sandbox_name]).await;
+    let delete = run_workspace_cli(session, workspace, &["sandbox", "delete", sandbox_name]).await;
     let delete_output = combined_output(&delete);
     if !delete.status.success() {
-        let _ = run_session_cli(session, &["sandbox", "delete", sandbox_name]).await;
+        let _ = run_workspace_cli(session, workspace, &["sandbox", "delete", sandbox_name]).await;
         panic!(
             "{} should be allowed to delete sandbox {sandbox_name}:\n{delete_output}",
             session.identity.username
         );
     }
 
-    if let Err(last_list) = wait_for_sandbox_absence(session, sandbox_name).await {
+    if let Err(last_list) = wait_for_sandbox_absence(session, workspace, sandbox_name).await {
         panic!(
             "deleted sandbox {sandbox_name} should disappear from the sandbox list:\n{last_list}"
         );
@@ -646,6 +943,7 @@ async fn assert_can_delete_sandbox(session: &LoginSession, sandbox_name: &str) {
 
 async fn wait_for_sandbox_absence(
     session: &LoginSession,
+    workspace: &str,
     sandbox_name: &str,
 ) -> Result<(), String> {
     const TIMEOUT: Duration = Duration::from_secs(30);
@@ -653,7 +951,8 @@ async fn wait_for_sandbox_absence(
 
     let deadline = Instant::now() + TIMEOUT;
     loop {
-        let list = run_session_cli(session, &["sandbox", "list", "--output", "json"]).await;
+        let list =
+            run_workspace_cli(session, workspace, &["sandbox", "list", "--output", "json"]).await;
         let list_output = combined_output(&list);
         if !list.status.success() {
             return Err(list_output);
@@ -678,6 +977,18 @@ async fn run_session_cli(session: &LoginSession, args: &[&str]) -> Output {
     run_cli(session.config_home.path(), &command_args).await
 }
 
+async fn run_workspace_cli(session: &LoginSession, workspace: &str, args: &[&str]) -> Output {
+    let mut command_args = Vec::with_capacity(args.len() + 4);
+    command_args.extend([
+        "--gateway",
+        session.identity.gateway_name,
+        "--workspace",
+        workspace,
+    ]);
+    command_args.extend_from_slice(args);
+    run_cli(session.config_home.path(), &command_args).await
+}
+
 fn assert_admin_role_denial(output: &Output, action: &str) {
     let denied = combined_output(output);
     let compact_denial: String = denied
@@ -687,6 +998,36 @@ fn assert_admin_role_denial(output: &Output, action: &str) {
     assert!(
         !output.status.success() && compact_denial.contains("openshell-admin"),
         "standard user unexpectedly authorized to {action}, or denial omitted the admin role:\n{denied}"
+    );
+}
+
+fn assert_workspace_admin_denial(output: &Output, action: &str) {
+    let denied = combined_output(output);
+    let normalized = denied.to_ascii_lowercase();
+    assert!(
+        !output.status.success()
+            && normalized.contains("workspace role")
+            && normalized.contains("admin"),
+        "workspace user unexpectedly authorized to {action}, or denial omitted the required workspace role:\n{denied}"
+    );
+}
+
+fn assert_platform_admin_denial(output: &Output, action: &str) {
+    let denied = combined_output(output);
+    assert!(
+        !output.status.success() && denied.to_ascii_lowercase().contains("platform admin"),
+        "non-platform-admin unexpectedly authorized to {action}, or denial omitted the required platform role:\n{denied}"
+    );
+}
+
+fn assert_non_member_denial(output: &Output, action: &str) {
+    let denied = combined_output(output);
+    assert!(
+        !output.status.success()
+            && denied
+                .to_ascii_lowercase()
+                .contains("not a member of workspace"),
+        "non-member unexpectedly authorized to {action}, or denial omitted membership context:\n{denied}"
     );
 }
 
