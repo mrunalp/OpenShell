@@ -17,13 +17,16 @@ use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Output, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use openshell_e2e::harness::binary::openshell_cmd;
 use serde_json::Value;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use url::Url;
+
+static SANDBOX_LIFECYCLE_LOCK: Mutex<()> = Mutex::const_new(());
 
 #[derive(Clone, Copy)]
 struct IdentityScenario {
@@ -72,6 +75,34 @@ async fn user_can_list_sandboxes() {
         "list sandboxes",
     )
     .await;
+}
+
+#[tokio::test]
+async fn admin_can_create_sandbox() {
+    let session = login_identity(ADMIN).await;
+    let _lifecycle = SANDBOX_LIFECYCLE_LOCK.lock().await;
+    assert_can_create_sandbox(&session, "oidc-admin-create").await;
+}
+
+#[tokio::test]
+async fn user_can_create_sandbox() {
+    let session = login_identity(USER).await;
+    let _lifecycle = SANDBOX_LIFECYCLE_LOCK.lock().await;
+    assert_can_create_sandbox(&session, "oidc-user-create").await;
+}
+
+#[tokio::test]
+async fn admin_can_delete_sandbox() {
+    let session = login_identity(ADMIN).await;
+    let _lifecycle = SANDBOX_LIFECYCLE_LOCK.lock().await;
+    assert_can_delete_sandbox(&session, "oidc-admin-delete").await;
+}
+
+#[tokio::test]
+async fn user_can_delete_sandbox() {
+    let session = login_identity(USER).await;
+    let _lifecycle = SANDBOX_LIFECYCLE_LOCK.lock().await;
+    assert_can_delete_sandbox(&session, "oidc-user-delete").await;
 }
 
 #[tokio::test]
@@ -526,6 +557,117 @@ async fn assert_allowed(session: &LoginSession, args: &[&str], action: &str) -> 
     output
 }
 
+async fn assert_can_create_sandbox(session: &LoginSession, sandbox_name: &str) {
+    let marker = format!("{sandbox_name}-ready");
+    let create = run_session_cli(
+        session,
+        &[
+            "sandbox",
+            "create",
+            "--name",
+            sandbox_name,
+            "--no-tty",
+            "--",
+            "echo",
+            &marker,
+        ],
+    )
+    .await;
+    let create_output = combined_output(&create);
+
+    if !create.status.success() {
+        let _ = run_session_cli(session, &["sandbox", "delete", sandbox_name]).await;
+        panic!(
+            "{} should be allowed to create sandbox {sandbox_name}:\n{create_output}",
+            session.identity.username
+        );
+    }
+
+    let list = run_session_cli(session, &["sandbox", "list", "--output", "json"]).await;
+    let list_output = combined_output(&list);
+    let cleanup = run_session_cli(session, &["sandbox", "delete", sandbox_name]).await;
+
+    assert!(
+        create_output.contains(&marker),
+        "sandbox command output should contain {marker}:\n{create_output}"
+    );
+    assert!(
+        list.status.success() && list_output.contains(sandbox_name),
+        "created sandbox {sandbox_name} should appear in the sandbox list:\n{list_output}"
+    );
+    assert!(
+        cleanup.status.success(),
+        "failed to clean up created sandbox {sandbox_name}:\n{}",
+        combined_output(&cleanup)
+    );
+}
+
+async fn assert_can_delete_sandbox(session: &LoginSession, sandbox_name: &str) {
+    let marker = format!("{sandbox_name}-ready");
+    let create = run_session_cli(
+        session,
+        &[
+            "sandbox",
+            "create",
+            "--name",
+            sandbox_name,
+            "--no-tty",
+            "--",
+            "echo",
+            &marker,
+        ],
+    )
+    .await;
+    let create_output = combined_output(&create);
+    if !create.status.success() {
+        let _ = run_session_cli(session, &["sandbox", "delete", sandbox_name]).await;
+        panic!("failed to create sandbox deletion target {sandbox_name}:\n{create_output}");
+    }
+
+    let delete = run_session_cli(session, &["sandbox", "delete", sandbox_name]).await;
+    let delete_output = combined_output(&delete);
+    if !delete.status.success() {
+        let _ = run_session_cli(session, &["sandbox", "delete", sandbox_name]).await;
+        panic!(
+            "{} should be allowed to delete sandbox {sandbox_name}:\n{delete_output}",
+            session.identity.username
+        );
+    }
+
+    if let Err(last_list) = wait_for_sandbox_absence(session, sandbox_name).await {
+        panic!(
+            "deleted sandbox {sandbox_name} should disappear from the sandbox list:\n{last_list}"
+        );
+    }
+}
+
+async fn wait_for_sandbox_absence(
+    session: &LoginSession,
+    sandbox_name: &str,
+) -> Result<(), String> {
+    const TIMEOUT: Duration = Duration::from_secs(30);
+    const POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let list = run_session_cli(session, &["sandbox", "list", "--output", "json"]).await;
+        let list_output = combined_output(&list);
+        if !list.status.success() {
+            return Err(list_output);
+        }
+
+        let present = list_output.contains(sandbox_name);
+        if !present {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(list_output);
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
 async fn run_session_cli(session: &LoginSession, args: &[&str]) -> Output {
     let mut command_args = Vec::with_capacity(args.len() + 2);
     command_args.extend(["--gateway", session.identity.gateway_name]);
@@ -551,6 +693,7 @@ async fn run_cli(config_home: &Path, args: &[&str]) -> Output {
         .args(args)
         .env("XDG_CONFIG_HOME", config_home)
         .env("HOME", config_home)
+        .env("OPENSHELL_GATEWAY_INSECURE", "true")
         .env_remove("OPENSHELL_GATEWAY")
         .env_remove("OPENSHELL_GATEWAY_ENDPOINT")
         .env_remove("OPENSHELL_OIDC_CLIENT_SECRET")
