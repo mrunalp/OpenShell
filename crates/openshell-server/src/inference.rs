@@ -97,8 +97,13 @@ impl Inference for InferenceService {
                 .await?
                 .ensure_active()?;
         authorize_workspace(
-            &self.state.store, &self.state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-        ).await?;
+            &self.state.store,
+            &self.state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::Admin,
+        )
+        .await?;
         let route_name = effective_route_name(&req.route_name)?;
         let verify = !req.no_verify;
         let route = upsert_inference_route(
@@ -141,8 +146,13 @@ impl Inference for InferenceService {
                 .await?
                 .name;
         authorize_workspace(
-            &self.state.store, &self.state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-        ).await?;
+            &self.state.store,
+            &self.state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::User,
+        )
+        .await?;
         let route_name = effective_route_name(&req.route_name)?;
         let route = self
             .state
@@ -188,8 +198,13 @@ impl Inference for InferenceService {
                 .await?
                 .name;
         authorize_workspace(
-            &self.state.store, &self.state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-        ).await?;
+            &self.state.store,
+            &self.state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::Admin,
+        )
+        .await?;
         let route_name = effective_route_name(&req.route_name)?;
         let deleted = self
             .state

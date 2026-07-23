@@ -32,8 +32,13 @@ pub(super) async fn handle_expose_service(
         .await?
         .ensure_active()?;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
     validate_endpoint_name("sandbox", &req.sandbox, MAX_SANDBOX_NAME_LEN)?;
     validate_optional_endpoint_name("service", &req.service, MAX_SERVICE_NAME_LEN)?;
     if req.target_port == 0 || req.target_port > u32::from(u16::MAX) {
@@ -146,8 +151,13 @@ pub(super) async fn handle_get_service(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
     validate_endpoint_name("sandbox", &req.sandbox, MAX_SANDBOX_NAME_LEN)?;
     validate_optional_endpoint_name("service", &req.service, MAX_SERVICE_NAME_LEN)?;
 
@@ -187,8 +197,13 @@ pub(super) async fn handle_list_services(
             .await?
             .name;
         authorize_workspace(
-            &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-        ).await?;
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::User,
+        )
+        .await?;
         if req.sandbox.is_empty() {
             state
                 .store
@@ -226,8 +241,13 @@ pub(super) async fn handle_delete_service(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
     validate_endpoint_name("sandbox", &req.sandbox, MAX_SANDBOX_NAME_LEN)?;
     validate_optional_endpoint_name("service", &req.service, MAX_SERVICE_NAME_LEN)?;
 

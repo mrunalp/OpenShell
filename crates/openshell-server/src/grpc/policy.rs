@@ -12,7 +12,9 @@
 
 use crate::ServerState;
 use crate::auth::principal::Principal;
-use crate::auth::workspace_authz::{MinWorkspaceRole, authorize_sandbox_workspace, authorize_workspace};
+use crate::auth::workspace_authz::{
+    MinWorkspaceRole, authorize_sandbox_workspace, authorize_workspace,
+};
 use crate::persistence::{
     DraftChunkRecord, ObjectId, ObjectName, ObjectType, ObjectWorkspace, PolicyRecord, Store,
 };
@@ -1233,9 +1235,13 @@ pub(super) async fn handle_get_sandbox_config(
         .ok_or_else(|| Status::not_found("sandbox not found"))?;
     let workspace = sandbox.object_workspace().to_string();
     authorize_sandbox_workspace(
-        &state.store, &state.admin_role, &principal,
-        &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
     let sandbox_provider_names = sandbox
         .spec
         .as_ref()
@@ -1648,9 +1654,8 @@ async fn handle_update_config_inner(
         } else {
             MinWorkspaceRole::Admin
         };
-        authorize_sandbox_workspace(
-            &state.store, &state.admin_role, p, &workspace, min_role,
-        ).await?;
+        authorize_sandbox_workspace(&state.store, &state.admin_role, p, &workspace, min_role)
+            .await?;
     }
     if sandbox_caller {
         validate_sandbox_caller_update(&req)?;
@@ -2263,8 +2268,13 @@ pub(super) async fn handle_get_sandbox_policy_status(
             .await?
             .name;
         authorize_workspace(
-            &state.store, &state.admin_role, &principal, &ws, MinWorkspaceRole::User,
-        ).await?;
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &ws,
+            MinWorkspaceRole::User,
+        )
+        .await?;
         ws
     };
 
@@ -2326,8 +2336,13 @@ pub(super) async fn handle_list_sandbox_policies(
             .await?
             .name;
         authorize_workspace(
-            &state.store, &state.admin_role, &principal, &ws, MinWorkspaceRole::User,
-        ).await?;
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &ws,
+            MinWorkspaceRole::User,
+        )
+        .await?;
         ws
     };
 
@@ -2455,8 +2470,13 @@ pub(super) async fn handle_get_sandbox_logs(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
     if req.sandbox_id.is_empty() {
         return Err(Status::invalid_argument("sandbox_id is required"));
     }
@@ -2867,8 +2887,13 @@ pub(super) async fn handle_get_draft_policy(
         .await?
         .name;
     authorize_sandbox_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
     if req.name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
     }
@@ -2943,8 +2968,13 @@ async fn handle_approve_draft_chunk_inner(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     if req.name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
     }
@@ -3050,8 +3080,13 @@ async fn handle_reject_draft_chunk_inner(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     if req.name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
     }
@@ -3155,8 +3190,13 @@ async fn handle_approve_all_draft_chunks_inner(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     if req.name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
     }
@@ -3283,8 +3323,13 @@ pub(super) async fn handle_edit_draft_chunk(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     if req.name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
     }
@@ -3354,8 +3399,13 @@ async fn handle_undo_draft_chunk_inner(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     if req.name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
     }
@@ -3446,8 +3496,13 @@ pub(super) async fn handle_clear_draft_chunks(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     if req.name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
     }
@@ -3489,8 +3544,13 @@ pub(super) async fn handle_get_draft_history(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
     if req.name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
     }

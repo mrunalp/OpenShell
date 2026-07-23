@@ -1337,8 +1337,13 @@ pub(super) async fn handle_create_provider(
         .await?
         .ensure_active()?;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     let Some(mut provider) = req.provider else {
         emit_provider_lifecycle(
             "custom",
@@ -1390,8 +1395,13 @@ pub(super) async fn handle_get_provider(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
     let provider = get_provider_record(state.store.as_ref(), &workspace, &req.name).await?;
 
     Ok(Response::new(ProviderResponse {
@@ -1426,8 +1436,13 @@ pub(super) async fn handle_list_providers(
                 .await?
                 .name;
         authorize_workspace(
-            &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-        ).await?;
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::User,
+        )
+        .await?;
         list_provider_records(state.store.as_ref(), &workspace, limit, request.offset).await?
     };
 
@@ -1451,8 +1466,13 @@ pub(super) async fn handle_list_provider_profiles(
             .name;
     if !workspace.is_empty() {
         authorize_workspace(
-            &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-        ).await?;
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::User,
+        )
+        .await?;
     }
     let limit = clamp_limit(request.limit, 100, MAX_PAGE_SIZE) as usize;
     let offset = request.offset as usize;
@@ -1483,8 +1503,13 @@ pub(super) async fn handle_get_provider_profile(
             .name;
     if !workspace.is_empty() {
         authorize_workspace(
-            &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-        ).await?;
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::User,
+        )
+        .await?;
     }
     let id = req.id;
     let id = normalize_profile_id_request(&id)?;
@@ -1513,8 +1538,13 @@ pub(super) async fn handle_import_provider_profiles(
             .ensure_active()?;
     if !workspace.is_empty() {
         authorize_workspace(
-            &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-        ).await?;
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::Admin,
+        )
+        .await?;
     }
     let (profiles, mut diagnostics) = profiles_from_import_items(&request.profiles);
     add_empty_profile_set_diagnostic(&profiles, &mut diagnostics);
@@ -1602,8 +1632,13 @@ pub(super) async fn handle_update_provider_profiles(
             .ensure_active()?;
     if !workspace.is_empty() {
         authorize_workspace(
-            &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-        ).await?;
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::Admin,
+        )
+        .await?;
     }
     let items = request.profile.into_iter().collect::<Vec<_>>();
     let (profiles, mut diagnostics) = profiles_from_import_items(&items);
@@ -1732,8 +1767,13 @@ pub(super) async fn handle_lint_provider_profiles(
             .name;
     if !workspace.is_empty() {
         authorize_workspace(
-            &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-        ).await?;
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::User,
+        )
+        .await?;
     }
     let (profiles, mut diagnostics) = profiles_from_import_items(&request.profiles);
     add_empty_profile_set_diagnostic(&profiles, &mut diagnostics);
@@ -1765,8 +1805,13 @@ pub(super) async fn handle_delete_provider_profile(
             .name;
     if !workspace.is_empty() {
         authorize_workspace(
-            &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-        ).await?;
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::Admin,
+        )
+        .await?;
     }
     let id = req.id;
     let id = normalize_profile_id_request(&id)?;
@@ -2379,8 +2424,13 @@ pub(super) async fn handle_update_provider(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     let Some(mut provider) = req.provider else {
         emit_provider_lifecycle(
             "custom",
@@ -2432,8 +2482,13 @@ pub(super) async fn handle_get_provider_refresh_status(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::User,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
     if request.provider.trim().is_empty() {
         return Err(Status::invalid_argument("provider is required"));
     }
@@ -2480,8 +2535,13 @@ pub(super) async fn handle_configure_provider_refresh(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     let provider_name = request.provider.trim();
     let credential_key = request.credential_key.trim();
     if provider_name.is_empty() {
@@ -2773,8 +2833,13 @@ pub(super) async fn handle_rotate_provider_credential(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     let provider_name = request.provider.trim();
     let credential_key = request.credential_key.trim();
     if provider_name.is_empty() {
@@ -2836,8 +2901,13 @@ pub(super) async fn handle_delete_provider_refresh(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     let provider_name = request.provider.trim();
     let credential_key = request.credential_key.trim();
     if provider_name.is_empty() {
@@ -2908,8 +2978,13 @@ pub(super) async fn handle_delete_provider(
         .await?
         .name;
     authorize_workspace(
-        &state.store, &state.admin_role, &principal, &workspace, MinWorkspaceRole::Admin,
-    ).await?;
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     let name = req.name;
     let provider_profile = provider_profile_for_name(state.store.as_ref(), &workspace, &name).await;
     let result = delete_provider_record(state.store.as_ref(), &workspace, &name).await;
