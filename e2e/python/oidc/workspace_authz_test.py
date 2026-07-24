@@ -481,6 +481,57 @@ def _workspace_rpcs() -> list[tuple[str, Callable]]:
     ]
 
 
+def _platform_profile_rpcs() -> list[tuple[str, Callable]]:
+    """Provider-profile RPCs targeting the explicit platform scope."""
+    return [
+        (
+            "ListProviderProfiles",
+            lambda s, m: s.ListProviderProfiles(
+                openshell_pb2.ListProviderProfilesRequest(workspace=""), metadata=m
+            ),
+        ),
+        (
+            "GetProviderProfile",
+            lambda s, m: s.GetProviderProfile(
+                openshell_pb2.GetProviderProfileRequest(id="nonexistent", workspace=""),
+                metadata=m,
+            ),
+        ),
+        (
+            "ImportProviderProfiles",
+            lambda s, m: s.ImportProviderProfiles(
+                openshell_pb2.ImportProviderProfilesRequest(workspace="", profiles=[]),
+                metadata=m,
+            ),
+        ),
+        (
+            "UpdateProviderProfiles",
+            lambda s, m: s.UpdateProviderProfiles(
+                openshell_pb2.UpdateProviderProfilesRequest(
+                    id="nonexistent", workspace=""
+                ),
+                metadata=m,
+            ),
+        ),
+        (
+            "LintProviderProfiles",
+            lambda s, m: s.LintProviderProfiles(
+                openshell_pb2.LintProviderProfilesRequest(workspace="", profiles=[]),
+                metadata=m,
+            ),
+        ),
+        (
+            "DeleteProviderProfile",
+            lambda s, m: s.DeleteProviderProfile(
+                openshell_pb2.DeleteProviderProfileRequest(
+                    id="nonexistent", workspace=""
+                ),
+                metadata=m,
+            ),
+        ),
+    ]
+
+
 _cached_inference_stub: inference_pb2_grpc.InferenceStub | None = None
 
 
@@ -1036,3 +1087,49 @@ class TestWorkspaceAuthorization:
                     openshell_pb2.DeleteWorkspaceRequest(name=ws2),
                     metadata=admin_md,
                 )
+
+    # ── Test 13: Platform provider profiles require Platform Admin ───
+
+    @pytest.mark.parametrize(
+        "rpc_name,call",
+        _platform_profile_rpcs(),
+        ids=[r[0] for r in _platform_profile_rpcs()],
+    )
+    def test_platform_provider_profile_operations_require_platform_admin(
+        self,
+        rpc_name: str,
+        call: Callable,
+        user_ctx: Any,
+    ) -> None:
+        stub, metadata, _ = user_ctx
+
+        with pytest.raises(grpc.RpcError) as exc_info:
+            call(stub, metadata)
+
+        assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED, (
+            f"{rpc_name}: expected PERMISSION_DENIED, got {exc_info.value.code()}"
+        )
+        assert "platform admin role required" in exc_info.value.details(), (
+            f"{rpc_name}: denial came from the wrong authorization layer: "
+            f"{exc_info.value.details()}"
+        )
+
+    @pytest.mark.parametrize(
+        "rpc_name,call",
+        _platform_profile_rpcs(),
+        ids=[r[0] for r in _platform_profile_rpcs()],
+    )
+    def test_platform_admin_can_access_platform_provider_profile_operations(
+        self,
+        rpc_name: str,
+        call: Callable,
+        admin_ctx: Any,
+    ) -> None:
+        stub, metadata = admin_ctx
+
+        try:
+            call(stub, metadata)
+        except grpc.RpcError as error:
+            assert error.code() != grpc.StatusCode.PERMISSION_DENIED, (
+                f"{rpc_name}: Platform Admin was denied: {error.details()}"
+            )

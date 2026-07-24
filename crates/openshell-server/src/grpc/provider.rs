@@ -1325,7 +1325,29 @@ use openshell_providers::{
 use std::sync::Arc;
 use tonic::{Request, Response};
 
+use crate::auth::principal::Principal;
 use crate::auth::workspace_authz::{MinWorkspaceRole, authorize_workspace, require_platform_admin};
+
+async fn authorize_provider_profile_scope(
+    state: &Arc<ServerState>,
+    principal: &Principal,
+    workspace: &str,
+    min_workspace_role: MinWorkspaceRole,
+) -> Result<(), Status> {
+    if workspace.is_empty() {
+        require_platform_admin(&state.admin_role, principal)
+    } else {
+        authorize_workspace(
+            &state.store,
+            &state.admin_role,
+            principal,
+            workspace,
+            min_workspace_role,
+        )
+        .await?;
+        Ok(())
+    }
+}
 
 pub(super) async fn handle_create_provider(
     state: &Arc<ServerState>,
@@ -1464,16 +1486,7 @@ pub(super) async fn handle_list_provider_profiles(
         super::workspace::resolve_profile_workspace(state.store.as_ref(), &request.workspace)
             .await?
             .name;
-    if !workspace.is_empty() {
-        authorize_workspace(
-            &state.store,
-            &state.admin_role,
-            &principal,
-            &workspace,
-            MinWorkspaceRole::User,
-        )
-        .await?;
-    }
+    authorize_provider_profile_scope(state, &principal, &workspace, MinWorkspaceRole::User).await?;
     let limit = clamp_limit(request.limit, 100, MAX_PAGE_SIZE) as usize;
     let offset = request.offset as usize;
     let catalog = state
@@ -1501,16 +1514,7 @@ pub(super) async fn handle_get_provider_profile(
         super::workspace::resolve_profile_workspace(state.store.as_ref(), &req.workspace)
             .await?
             .name;
-    if !workspace.is_empty() {
-        authorize_workspace(
-            &state.store,
-            &state.admin_role,
-            &principal,
-            &workspace,
-            MinWorkspaceRole::User,
-        )
-        .await?;
-    }
+    authorize_provider_profile_scope(state, &principal, &workspace, MinWorkspaceRole::User).await?;
     let id = req.id;
     let id = normalize_profile_id_request(&id)?;
     let catalog = state
@@ -1536,16 +1540,8 @@ pub(super) async fn handle_import_provider_profiles(
         super::workspace::resolve_profile_workspace(state.store.as_ref(), &request.workspace)
             .await?
             .ensure_active()?;
-    if !workspace.is_empty() {
-        authorize_workspace(
-            &state.store,
-            &state.admin_role,
-            &principal,
-            &workspace,
-            MinWorkspaceRole::Admin,
-        )
+    authorize_provider_profile_scope(state, &principal, &workspace, MinWorkspaceRole::Admin)
         .await?;
-    }
     let (profiles, mut diagnostics) = profiles_from_import_items(&request.profiles);
     add_empty_profile_set_diagnostic(&profiles, &mut diagnostics);
     let _sandbox_sync_guard = state.compute.sandbox_sync_guard().await;
@@ -1630,16 +1626,8 @@ pub(super) async fn handle_update_provider_profiles(
         super::workspace::resolve_profile_workspace(state.store.as_ref(), &request.workspace)
             .await?
             .ensure_active()?;
-    if !workspace.is_empty() {
-        authorize_workspace(
-            &state.store,
-            &state.admin_role,
-            &principal,
-            &workspace,
-            MinWorkspaceRole::Admin,
-        )
+    authorize_provider_profile_scope(state, &principal, &workspace, MinWorkspaceRole::Admin)
         .await?;
-    }
     let items = request.profile.into_iter().collect::<Vec<_>>();
     let (profiles, mut diagnostics) = profiles_from_import_items(&items);
     add_empty_profile_set_diagnostic(&profiles, &mut diagnostics);
@@ -1765,16 +1753,7 @@ pub(super) async fn handle_lint_provider_profiles(
         super::workspace::resolve_profile_workspace(state.store.as_ref(), &request.workspace)
             .await?
             .name;
-    if !workspace.is_empty() {
-        authorize_workspace(
-            &state.store,
-            &state.admin_role,
-            &principal,
-            &workspace,
-            MinWorkspaceRole::User,
-        )
-        .await?;
-    }
+    authorize_provider_profile_scope(state, &principal, &workspace, MinWorkspaceRole::User).await?;
     let (profiles, mut diagnostics) = profiles_from_import_items(&request.profiles);
     add_empty_profile_set_diagnostic(&profiles, &mut diagnostics);
     let catalog = state
@@ -1803,16 +1782,8 @@ pub(super) async fn handle_delete_provider_profile(
         super::workspace::resolve_profile_workspace(state.store.as_ref(), &req.workspace)
             .await?
             .name;
-    if !workspace.is_empty() {
-        authorize_workspace(
-            &state.store,
-            &state.admin_role,
-            &principal,
-            &workspace,
-            MinWorkspaceRole::Admin,
-        )
+    authorize_provider_profile_scope(state, &principal, &workspace, MinWorkspaceRole::Admin)
         .await?;
-    }
     let id = req.id;
     let id = normalize_profile_id_request(&id)?;
     let _sandbox_sync_guard = state.compute.sandbox_sync_guard().await;
@@ -8871,6 +8842,105 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn platform_provider_profile_operations_require_platform_admin() {
+        let mut state = test_server_state().await;
+        Arc::get_mut(&mut state).unwrap().admin_role = "required-platform-admin".to_string();
+
+        let catalog_error = handle_list_provider_profiles(
+            &state,
+            authed_request(ListProviderProfilesRequest {
+                workspace: String::new(),
+                ..ListProviderProfilesRequest::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(catalog_error.code(), Code::PermissionDenied);
+        assert!(
+            catalog_error
+                .message()
+                .contains("platform admin role required")
+        );
+
+        let get_error = handle_get_provider_profile(
+            &state,
+            authed_request(GetProviderProfileRequest {
+                id: "nonexistent".to_string(),
+                workspace: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(get_error.code(), Code::PermissionDenied);
+        assert!(get_error.message().contains("platform admin role required"));
+
+        let import_error = handle_import_provider_profiles(
+            &state,
+            authed_request(ImportProviderProfilesRequest {
+                workspace: String::new(),
+                profiles: Vec::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(import_error.code(), Code::PermissionDenied);
+        assert!(
+            import_error
+                .message()
+                .contains("platform admin role required")
+        );
+
+        let update_error = handle_update_provider_profiles(
+            &state,
+            authed_request(UpdateProviderProfilesRequest {
+                id: "nonexistent".to_string(),
+                workspace: String::new(),
+                ..UpdateProviderProfilesRequest::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(update_error.code(), Code::PermissionDenied);
+        assert!(
+            update_error
+                .message()
+                .contains("platform admin role required")
+        );
+
+        let validation_error = handle_lint_provider_profiles(
+            &state,
+            authed_request(LintProviderProfilesRequest {
+                workspace: String::new(),
+                profiles: Vec::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(validation_error.code(), Code::PermissionDenied);
+        assert!(
+            validation_error
+                .message()
+                .contains("platform admin role required")
+        );
+
+        let delete_error = handle_delete_provider_profile(
+            &state,
+            authed_request(DeleteProviderProfileRequest {
+                id: "nonexistent".to_string(),
+                workspace: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(delete_error.code(), Code::PermissionDenied);
+        assert!(
+            delete_error
+                .message()
+                .contains("platform admin role required")
+        );
     }
 
     #[tokio::test]
