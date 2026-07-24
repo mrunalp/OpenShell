@@ -442,6 +442,7 @@ fi
 
 PKI_DIR="${WORKDIR}/pki"
 e2e_generate_pki "${GATEWAY_BIN}" "${PKI_DIR}"
+export OPENSHELL_E2E_GATEWAY_CA_CERT="${PKI_DIR}/ca.crt"
 
 HOST_PORT=$(e2e_pick_port)
 STATE_DIR="${XDG_STATE_HOME}"
@@ -558,7 +559,7 @@ fi
 export OPENSHELL_GATEWAY="${GATEWAY_NAME}"
 export OPENSHELL_PROVISION_TIMEOUT="${OPENSHELL_PROVISION_TIMEOUT:-180}"
 
-if [ -n "${OPENSHELL_OIDC_ISSUER:-}" ]; then
+if [ "${OIDC_MODE}" = "1" ] || [ -n "${OPENSHELL_OIDC_ISSUER:-}" ]; then
   export OPENSHELL_E2E_OIDC=1
   export OPENSHELL_E2E_OIDC_SCOPES=1
 fi

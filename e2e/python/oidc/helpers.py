@@ -35,6 +35,10 @@ def keycloak_url() -> str:
     """
     if url := os.environ.get("OPENSHELL_KEYCLOAK_URL"):
         return url
+    if issuer := os.environ.get("OPENSHELL_E2E_OIDC_ISSUER"):
+        idx = issuer.find("/realms/")
+        if idx > 0:
+            return issuer[:idx]
     cluster_name = os.environ.get("OPENSHELL_GATEWAY", "openshell")
     metadata_path = (
         _xdg_config_home() / "openshell" / "gateways" / cluster_name / "metadata.json"
@@ -56,6 +60,8 @@ TOKEN_ENDPOINT = (
 
 def _gateway_endpoint() -> tuple[str, bool]:
     """Read the active gateway endpoint from metadata."""
+    if endpoint := os.environ.get("OPENSHELL_E2E_OIDC_GATEWAY_ENDPOINT"):
+        return endpoint, endpoint.startswith("https://")
     cluster_name = os.environ.get("OPENSHELL_GATEWAY", "openshell")
     metadata_path = (
         _xdg_config_home() / "openshell" / "gateways" / cluster_name / "metadata.json"
@@ -115,7 +121,7 @@ def get_ci_token(
 
 
 def grpc_channel() -> grpc.Channel:
-    """Create a gRPC channel to the gateway with mTLS transport."""
+    """Create a gRPC channel to the gateway over its configured TLS transport."""
     endpoint, is_tls = _gateway_endpoint()
     parsed = urllib.parse.urlparse(endpoint)
     host = parsed.hostname or "127.0.0.1"
@@ -123,15 +129,17 @@ def grpc_channel() -> grpc.Channel:
     target = f"{host}:{port}"
 
     if is_tls:
-        mtls = _mtls_dir()
-        ca_cert = (mtls / "ca.crt").read_bytes()
-        client_cert = (mtls / "tls.crt").read_bytes()
-        client_key = (mtls / "tls.key").read_bytes()
-        creds = grpc.ssl_channel_credentials(
-            root_certificates=ca_cert,
-            private_key=client_key,
-            certificate_chain=client_cert,
-        )
+        if ca_path := os.environ.get("OPENSHELL_E2E_GATEWAY_CA_CERT"):
+            creds = grpc.ssl_channel_credentials(
+                root_certificates=Path(ca_path).read_bytes()
+            )
+        else:
+            mtls = _mtls_dir()
+            creds = grpc.ssl_channel_credentials(
+                root_certificates=(mtls / "ca.crt").read_bytes(),
+                private_key=(mtls / "tls.key").read_bytes(),
+                certificate_chain=(mtls / "tls.crt").read_bytes(),
+            )
         return grpc.secure_channel(target, creds)
     return grpc.insecure_channel(target)
 

@@ -193,15 +193,6 @@ def _workspace_rpcs() -> list[tuple[str, Callable]]:
                 metadata=m,
             ),
         ),
-        (
-            "GetSandboxLogs",
-            lambda s, m: s.GetSandboxLogs(
-                openshell_pb2.GetSandboxLogsRequest(
-                    sandbox_id="nonexistent", workspace=WS
-                ),
-                metadata=m,
-            ),
-        ),
         # ── Provider domain ──
         (
             "CreateProvider",
@@ -604,7 +595,103 @@ class TestWorkspaceAuthorization:
             )
         assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
 
-    # ── Test 3: Non-member ListWorkspaces returns filtered results ───
+    # ── Test 3: Sandbox log authorization uses persisted workspace ───
+
+    def test_get_sandbox_logs_rejects_spoofed_workspace(
+        self,
+        admin_ctx: Any,
+        user_ctx: Any,
+    ) -> None:
+        admin_stub, admin_md = admin_ctx
+        user_stub, user_md, user_sub = user_ctx
+        other_workspace = "e2e-authz-log-b"
+        sandbox_name = "e2e-log-target"
+
+        with contextlib.suppress(grpc.RpcError):
+            admin_stub.DeleteWorkspace(
+                openshell_pb2.DeleteWorkspaceRequest(name=other_workspace),
+                metadata=admin_md,
+            )
+        admin_stub.CreateWorkspace(
+            openshell_pb2.CreateWorkspaceRequest(name=other_workspace),
+            metadata=admin_md,
+        )
+        _add_member(
+            admin_stub, admin_md, WS, user_sub, openshell_pb2.WORKSPACE_ROLE_USER
+        )
+
+        sandbox_id = ""
+        try:
+            response = admin_stub.CreateSandbox(
+                openshell_pb2.CreateSandboxRequest(
+                    name=sandbox_name,
+                    workspace=other_workspace,
+                    spec=openshell_pb2.SandboxSpec(),
+                ),
+                metadata=admin_md,
+            )
+            sandbox_id = response.sandbox.metadata.id
+
+            with pytest.raises(grpc.RpcError) as exc_info:
+                user_stub.GetSandboxLogs(
+                    openshell_pb2.GetSandboxLogsRequest(
+                        sandbox_id=sandbox_id,
+                        workspace=WS,
+                    ),
+                    metadata=user_md,
+                )
+            assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+        finally:
+            if sandbox_id:
+                with contextlib.suppress(grpc.RpcError):
+                    admin_stub.DeleteSandbox(
+                        openshell_pb2.DeleteSandboxRequest(
+                            name=sandbox_name,
+                            workspace=other_workspace,
+                        ),
+                        metadata=admin_md,
+                    )
+            _remove_member(admin_stub, admin_md, WS, user_sub)
+            with contextlib.suppress(grpc.RpcError):
+                admin_stub.DeleteWorkspace(
+                    openshell_pb2.DeleteWorkspaceRequest(name=other_workspace),
+                    metadata=admin_md,
+                )
+
+    # ── Test 4: Global config requires Platform Admin ────────────────
+
+    def test_global_update_rejected_for_default_workspace_admin(
+        self,
+        admin_ctx: Any,
+        user_ctx: Any,
+    ) -> None:
+        admin_stub, admin_md = admin_ctx
+        user_stub, user_md, user_sub = user_ctx
+
+        _remove_member(admin_stub, admin_md, "default", user_sub)
+        _add_member(
+            admin_stub,
+            admin_md,
+            "default",
+            user_sub,
+            openshell_pb2.WORKSPACE_ROLE_ADMIN,
+        )
+        try:
+            with pytest.raises(grpc.RpcError) as exc_info:
+                user_stub.UpdateConfig(
+                    openshell_pb2.UpdateConfigRequest(
+                        workspace="",
+                        setting_key="log_level",
+                        delete_setting=True,
+                        **{"global": True},
+                    ),
+                    metadata=user_md,
+                )
+            assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+        finally:
+            _remove_member(admin_stub, admin_md, "default", user_sub)
+
+    # ── Test 5: Non-member ListWorkspaces returns filtered results ───
 
     def test_non_member_list_workspaces_filtered(
         self,
@@ -620,7 +707,7 @@ class TestWorkspaceAuthorization:
             f"non-member should not see workspace {WS} in ListWorkspaces"
         )
 
-    # ── Test 4: Platform Admin bypass ────────────────────────────────
+    # ── Test 6: Platform Admin bypass ────────────────────────────────
 
     @pytest.mark.usefixtures("seed_provider")
     def test_platform_admin_get_workspace(
@@ -680,7 +767,7 @@ class TestWorkspaceAuthorization:
         except grpc.RpcError as e:
             assert e.code() != grpc.StatusCode.PERMISSION_DENIED
 
-    # ── Test 5: User member — read operations succeed ────────────────
+    # ── Test 7: User member — read operations succeed ────────────────
 
     def test_user_member_read_operations(
         self,
@@ -735,7 +822,7 @@ class TestWorkspaceAuthorization:
         finally:
             _remove_member(admin_stub, admin_md, WS, user_sub)
 
-    # ── Test 6: User member — admin operations denied ────────────────
+    # ── Test 8: User member — admin operations denied ────────────────
 
     def test_user_member_admin_operations_denied(
         self,
@@ -792,7 +879,7 @@ class TestWorkspaceAuthorization:
         finally:
             _remove_member(admin_stub, admin_md, WS, user_sub)
 
-    # ── Test 7: Workspace Admin — admin operations succeed ───────────
+    # ── Test 9: Workspace Admin — admin operations succeed ───────────
 
     def test_workspace_admin_can_create_provider(
         self,
@@ -837,7 +924,7 @@ class TestWorkspaceAuthorization:
                 )
             _remove_member(admin_stub, admin_md, WS, user_sub)
 
-    # ── Test 8: all_workspaces rejected for non-Platform-Admin ───────
+    # ── Test 10: all_workspaces rejected for non-Platform-Admin ──────
 
     def test_all_workspaces_rejected_for_workspace_admin(
         self,
@@ -874,7 +961,7 @@ class TestWorkspaceAuthorization:
         finally:
             _remove_member(admin_stub, admin_md, WS, user_sub)
 
-    # ── Test 9: Workspace Admin cannot assign Admin role ─────────────
+    # ── Test 11: Workspace Admin cannot assign Admin role ────────────
 
     def test_workspace_admin_cannot_assign_admin_role(
         self,
@@ -913,7 +1000,7 @@ class TestWorkspaceAuthorization:
         finally:
             _remove_member(admin_stub, admin_md, WS, user_sub)
 
-    # ── Test 10: ListWorkspaces filtered by membership ───────────────
+    # ── Test 12: ListWorkspaces filtered by membership ───────────────
 
     def test_list_workspaces_filtered_by_membership(
         self,
