@@ -135,6 +135,18 @@ Re-authenticate an OIDC gateway with:
 openshell gateway login production
 ```
 
+Inspect the identity the gateway validated:
+
+```shell
+openshell whoami
+openshell whoami --output json
+```
+
+The output includes the stable subject used for workspace membership, the
+display name when available, identity provider, roles, and scopes. The gateway
+returns its validated identity; the CLI does not infer these values from an
+unverified local token payload.
+
 ### Edge JWT (cloud gateways)
 
 For gateways behind a reverse proxy that handles authentication (e.g. Cloudflare Access), the CLI uses a browser-based login flow and routes traffic through a WebSocket tunnel.

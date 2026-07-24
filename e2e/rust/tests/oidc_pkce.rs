@@ -75,6 +75,33 @@ async fn admin_can_list_sandboxes() {
 }
 
 #[tokio::test]
+async fn user_can_report_gateway_validated_identity() {
+    let session = login_identity(USER).await;
+    let output = assert_allowed(
+        &session,
+        &["whoami", "--output", "json"],
+        "report current identity",
+    )
+    .await;
+    let stdout = String::from_utf8(output.stdout).expect("whoami output should be UTF-8");
+    let json_start = stdout.find('{').expect("whoami output should contain JSON");
+    let json_end = stdout
+        .rfind('}')
+        .expect("whoami output should contain a complete JSON object");
+    let identity: Value = serde_json::from_str(&stdout[json_start..=json_end])
+        .expect("whoami --output json should return JSON on stdout");
+
+    assert_eq!(identity["subject"], session.subject);
+    assert_eq!(identity["identity_provider"], "oidc");
+    assert!(
+        identity["roles"]
+            .as_array()
+            .is_some_and(|roles| roles.iter().any(|role| role == USER.expected_role)),
+        "whoami should report the configured user role: {identity}"
+    );
+}
+
+#[tokio::test]
 async fn user_can_list_sandboxes() {
     const WORKSPACE: &str = "oidc-user-list-sb";
     let user = login_identity(USER).await;
@@ -240,7 +267,7 @@ async fn user_cannot_create_provider() {
         ],
     )
     .await;
-    assert_workspace_admin_denial(&output, "create a provider");
+    assert_workspace_admin_denial(&output, &user, WORKSPACE, "create a provider");
     delete_workspace(&admin, WORKSPACE).await;
 }
 
@@ -269,7 +296,7 @@ async fn user_cannot_delete_provider() {
     .await;
 
     let denied = run_workspace_cli(&user, WORKSPACE, &["provider", "delete", PROVIDER]).await;
-    assert_workspace_admin_denial(&denied, "delete a provider");
+    assert_workspace_admin_denial(&denied, &user, WORKSPACE, "delete a provider");
 
     assert_workspace_allowed(
         &admin,
@@ -396,7 +423,7 @@ async fn workspace_user_cannot_manage_members() {
         ],
     )
     .await;
-    assert_workspace_admin_denial(&denied, "add a workspace member");
+    assert_workspace_admin_denial(&denied, &user, WORKSPACE, "add a workspace member");
     delete_workspace(&admin, WORKSPACE).await;
 }
 
@@ -1427,14 +1454,32 @@ fn assert_admin_role_denial(output: &Output, action: &str) {
     );
 }
 
-fn assert_workspace_admin_denial(output: &Output, action: &str) {
+fn assert_workspace_admin_denial(
+    output: &Output,
+    session: &LoginSession,
+    workspace: &str,
+    action: &str,
+) {
     let denied = combined_output(output);
-    let normalized = denied.to_ascii_lowercase();
+    let remediation = format!(
+        "openshell workspace member add --workspace '{workspace}' --subject '{}' --role admin",
+        session.subject
+    );
+    let compact_denial: String = denied
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != '│')
+        .collect();
+    let compact_remediation: String = remediation
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
     assert!(
         !output.status.success()
-            && normalized.contains("workspace role")
-            && normalized.contains("admin"),
-        "workspace user unexpectedly authorized to {action}, or denial omitted the required workspace role:\n{denied}"
+            && compact_denial
+                .to_ascii_lowercase()
+                .contains("workspacerole'admin'")
+            && compact_denial.contains(&compact_remediation),
+        "workspace user unexpectedly authorized to {action}, or denial omitted the admin remediation command:\n{denied}"
     );
 }
 

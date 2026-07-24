@@ -45,13 +45,6 @@ pub fn all_paths() -> impl Iterator<Item = &'static str> {
     super::descriptor_authz::all_paths()
 }
 
-/// Required Bearer scope for the method, or `None` if scopes don't
-/// apply (`unauthenticated`, `sandbox`).
-#[must_use]
-pub fn required_scope(method: &str) -> Option<&str> {
-    lookup(method).and_then(|e| e.scope.as_deref())
-}
-
 /// Required role for the method on the Bearer path.
 #[must_use]
 #[allow(dead_code)]

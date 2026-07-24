@@ -39,14 +39,14 @@ use openshell_core::proto::{
     CreateSandboxRequest, CreateSshSessionRequest, DeleteInferenceRouteRequest,
     DeleteProviderProfileRequest, DeleteProviderRefreshRequest, DeleteProviderRequest,
     DeleteSandboxRequest, DeleteServiceRequest, DetachSandboxProviderRequest, ExecSandboxRequest,
-    ExposeServiceRequest, GetDraftHistoryRequest, GetDraftPolicyRequest, GetGatewayConfigRequest,
-    GetGatewayInfoRequest, GetInferenceRouteRequest, GetProviderProfileRequest,
-    GetProviderRefreshStatusRequest, GetProviderRequest, GetSandboxConfigRequest,
-    GetSandboxLogsRequest, GetSandboxPolicyStatusRequest, GetSandboxRequest, GetServiceRequest,
-    GpuResourceRequirements, HealthRequest, ImportProviderProfilesRequest,
-    LintProviderProfilesRequest, ListProviderProfilesRequest, ListProvidersRequest,
-    ListSandboxPoliciesRequest, ListSandboxProvidersRequest, ListSandboxesRequest,
-    ListServicesRequest, PlatformEvent, PolicySource, PolicyStatus, Provider,
+    ExposeServiceRequest, GetCurrentUserRequest, GetDraftHistoryRequest, GetDraftPolicyRequest,
+    GetGatewayConfigRequest, GetGatewayInfoRequest, GetInferenceRouteRequest,
+    GetProviderProfileRequest, GetProviderRefreshStatusRequest, GetProviderRequest,
+    GetSandboxConfigRequest, GetSandboxLogsRequest, GetSandboxPolicyStatusRequest,
+    GetSandboxRequest, GetServiceRequest, GpuResourceRequirements, HealthRequest,
+    ImportProviderProfilesRequest, LintProviderProfilesRequest, ListProviderProfilesRequest,
+    ListProvidersRequest, ListSandboxPoliciesRequest, ListSandboxProvidersRequest,
+    ListSandboxesRequest, ListServicesRequest, PlatformEvent, PolicySource, PolicyStatus, Provider,
     ProviderCredentialRefreshStatus, ProviderCredentialRefreshStrategy, ProviderProfile,
     ProviderProfileDiagnostic, ProviderProfileImportItem, RejectDraftChunkRequest,
     ResourceRequirements, RevokeSshSessionRequest, RotateProviderCredentialRequest, Sandbox,
@@ -548,6 +548,15 @@ struct ComputeDriverCapabilitiesView {
     driver_version: String,
 }
 
+#[derive(Debug, Clone)]
+struct CurrentUserView {
+    subject: String,
+    display_name: Option<String>,
+    roles: Vec<String>,
+    scopes: Vec<String>,
+    identity_provider: String,
+}
+
 /// Show gateway status.
 #[allow(clippy::branches_sharing_code)]
 pub async fn gateway_status(gateway_name: &str, server: &str, tls: &TlsOptions) -> Result<()> {
@@ -603,6 +612,56 @@ pub async fn gateway_status(gateway_name: &str, server: &str, tls: &TlsOptions) 
     }
 
     Ok(())
+}
+
+/// Show the identity validated by the selected gateway.
+pub async fn whoami(server: &str, tls: &TlsOptions, output: &str) -> Result<()> {
+    let mut client = grpc_client(server, tls).await?;
+    let identity = client
+        .get_current_user(GetCurrentUserRequest {})
+        .await
+        .map_err(|err| match err.code() {
+            Code::Unimplemented => miette!("whoami is not supported by this gateway version"),
+            Code::Unauthenticated => miette!("whoami requires authentication: {err}"),
+            _ => miette!("get_current_user failed: {err}"),
+        })?
+        .into_inner();
+
+    let view = CurrentUserView {
+        subject: identity.subject,
+        display_name: (!identity.display_name.is_empty()).then_some(identity.display_name),
+        roles: identity.roles,
+        scopes: identity.scopes,
+        identity_provider: identity.identity_provider,
+    };
+    print_current_user(&view, output)
+}
+
+fn print_current_user(view: &CurrentUserView, output: &str) -> Result<()> {
+    if crate::output::print_output_single(output, view, current_user_to_json)? {
+        return Ok(());
+    }
+
+    println!("{}", "Current User".cyan().bold());
+    println!();
+    println!("  {} {}", "Subject:".dimmed(), view.subject);
+    if let Some(display_name) = &view.display_name {
+        println!("  {} {}", "Name:".dimmed(), display_name);
+    }
+    println!("  {} {}", "Provider:".dimmed(), view.identity_provider);
+    println!("  {} {}", "Roles:".dimmed(), view.roles.join(", "));
+    println!("  {} {}", "Scopes:".dimmed(), view.scopes.join(", "));
+    Ok(())
+}
+
+fn current_user_to_json(view: &CurrentUserView) -> serde_json::Value {
+    serde_json::json!({
+        "subject": &view.subject,
+        "display_name": &view.display_name,
+        "roles": &view.roles,
+        "scopes": &view.scopes,
+        "identity_provider": &view.identity_provider,
+    })
 }
 
 fn gateway_service_status_name(status: i32) -> &'static str {

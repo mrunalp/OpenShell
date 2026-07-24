@@ -114,6 +114,28 @@ def _assert_non_member_denial(
     )
 
 
+def _assert_workspace_admin_denial(
+    error: grpc.RpcError,
+    workspace: str,
+    subject: str,
+    rpc_name: str,
+) -> None:
+    assert error.code() == grpc.StatusCode.PERMISSION_DENIED, (
+        f"{rpc_name}: expected PERMISSION_DENIED, got {error.code()}"
+    )
+    details = error.details()
+    assert f"workspace role 'admin' required in workspace '{workspace}'" in details, (
+        f"{rpc_name}: denial came from the wrong authorization layer: {details}"
+    )
+    command = (
+        "openshell workspace member add "
+        f"--workspace '{workspace}' --subject '{subject}' --role admin"
+    )
+    assert command in details, (
+        f"{rpc_name}: denial omitted the admin remediation command: {details}"
+    )
+
+
 def _workspace_rpcs() -> list[tuple[str, Callable]]:
     """All workspace-scoped RPCs that accept a workspace field."""
     return [
@@ -740,7 +762,12 @@ class TestWorkspaceAuthorization:
                     ),
                     metadata=user_md,
                 )
-            assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+            _assert_non_member_denial(
+                exc_info.value,
+                other_workspace,
+                user_sub,
+                "GetSandboxLogs",
+            )
         finally:
             if sandbox_id:
                 with contextlib.suppress(grpc.RpcError):
@@ -788,6 +815,10 @@ class TestWorkspaceAuthorization:
                     metadata=user_md,
                 )
             assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+            assert "platform admin role required" in exc_info.value.details(), (
+                "UpdateConfig: denial came from the wrong authorization layer: "
+                f"{exc_info.value.details()}"
+            )
         finally:
             _remove_member(admin_stub, admin_md, "default", user_sub)
 
@@ -951,7 +982,12 @@ class TestWorkspaceAuthorization:
                     ),
                     metadata=user_md,
                 )
-            assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+            _assert_workspace_admin_denial(
+                exc_info.value,
+                WS,
+                user_sub,
+                "CreateProvider",
+            )
 
             # AddWorkspaceMember requires workspace admin
             with pytest.raises(grpc.RpcError) as exc_info:
@@ -963,7 +999,12 @@ class TestWorkspaceAuthorization:
                     ),
                     metadata=user_md,
                 )
-            assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+            _assert_workspace_admin_denial(
+                exc_info.value,
+                WS,
+                user_sub,
+                "AddWorkspaceMember",
+            )
 
             # ApproveDraftChunk requires workspace admin
             with pytest.raises(grpc.RpcError) as exc_info:
@@ -975,7 +1016,12 @@ class TestWorkspaceAuthorization:
                     ),
                     metadata=user_md,
                 )
-            assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+            _assert_workspace_admin_denial(
+                exc_info.value,
+                WS,
+                user_sub,
+                "ApproveDraftChunk",
+            )
         finally:
             _remove_member(admin_stub, admin_md, WS, user_sub)
 

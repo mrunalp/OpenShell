@@ -26,6 +26,13 @@ service OpenShell {
     };
   }
 
+  // Return the authenticated caller identity established by the gateway.
+  rpc GetCurrentUser(GetCurrentUserRequest) returns (GetCurrentUserResponse) {
+    option (openshell.options.v1.authorization) = {
+      auth_mode: "bearer"
+    };
+  }
+
   // Fetch elevated live gateway runtime metadata.
   rpc GetGatewayInfo(GetGatewayInfoRequest) returns (GetGatewayInfoResponse) {
     option (openshell.options.v1.authorization) = {
@@ -676,6 +683,27 @@ message HealthResponse {
 
   // Service version.
   string version = 2;
+}
+
+// Current-user request. The identity comes from the authenticated request.
+message GetCurrentUserRequest {}
+
+// Authenticated user identity as validated by the gateway.
+message GetCurrentUserResponse {
+  // Stable identity subject (for example, the OIDC `sub` claim).
+  string subject = 1;
+
+  // Human-readable identity name when supplied by the authentication provider.
+  string display_name = 2;
+
+  // Roles granted to the authenticated identity.
+  repeated string roles = 3;
+
+  // OAuth2 scopes granted to the authenticated identity.
+  repeated string scopes = 4;
+
+  // Authentication provider that established the identity.
+  string identity_provider = 5;
 }
 
 // Gateway info request.

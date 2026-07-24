@@ -143,7 +143,9 @@ gateway-minted JWT bootstrap path: the supervisor starts with a projected
 ServiceAccount token, exchanges it for a gateway-minted sandbox JWT, and uses
 that JWT on subsequent gateway RPCs.
 User-facing mutations are authorized by role policy when OIDC or edge identity
-is enabled.
+is enabled. The authenticated `GetCurrentUser` endpoint exposes the gateway's
+validated user subject, display name, roles, scopes, and identity provider for
+CLI identity inspection without client-side token decoding.
 
 Sandbox secrets are gateway-signed JWTs bound to a single sandbox ID. Docker,
 Podman, and VM drivers deliver the initial token through supervisor-only

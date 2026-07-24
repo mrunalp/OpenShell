@@ -24,12 +24,13 @@ use openshell_core::proto::{
     DeleteServiceRequest, DeleteServiceResponse, DeleteWorkspaceRequest, DeleteWorkspaceResponse,
     DetachSandboxProviderRequest, DetachSandboxProviderResponse, EditDraftChunkRequest,
     EditDraftChunkResponse, ExecSandboxEvent, ExecSandboxInput, ExecSandboxRequest,
-    ExposeServiceRequest, GatewayMessage, GetDraftHistoryRequest, GetDraftHistoryResponse,
-    GetDraftPolicyRequest, GetDraftPolicyResponse, GetGatewayConfigRequest,
-    GetGatewayConfigResponse, GetGatewayInfoRequest, GetGatewayInfoResponse,
-    GetProviderProfileRequest, GetProviderRefreshStatusRequest, GetProviderRefreshStatusResponse,
-    GetProviderRequest, GetSandboxConfigRequest, GetSandboxConfigResponse, GetSandboxLogsRequest,
-    GetSandboxLogsResponse, GetSandboxPolicyStatusRequest, GetSandboxPolicyStatusResponse,
+    ExposeServiceRequest, GatewayMessage, GetCurrentUserRequest, GetCurrentUserResponse,
+    GetDraftHistoryRequest, GetDraftHistoryResponse, GetDraftPolicyRequest, GetDraftPolicyResponse,
+    GetGatewayConfigRequest, GetGatewayConfigResponse, GetGatewayInfoRequest,
+    GetGatewayInfoResponse, GetProviderProfileRequest, GetProviderRefreshStatusRequest,
+    GetProviderRefreshStatusResponse, GetProviderRequest, GetSandboxConfigRequest,
+    GetSandboxConfigResponse, GetSandboxLogsRequest, GetSandboxLogsResponse,
+    GetSandboxPolicyStatusRequest, GetSandboxPolicyStatusResponse,
     GetSandboxProviderEnvironmentRequest, GetSandboxProviderEnvironmentResponse, GetSandboxRequest,
     GetServiceRequest, GetWorkspaceRequest, GetWorkspaceResponse, HealthRequest, HealthResponse,
     ImportProviderProfilesRequest, ImportProviderProfilesResponse, IssueSandboxTokenRequest,
@@ -226,6 +227,13 @@ impl OpenShell for OpenShellService {
             status: ServiceStatus::Healthy.into(),
             version: openshell_core::VERSION.to_string(),
         }))
+    }
+
+    async fn get_current_user(
+        &self,
+        request: Request<GetCurrentUserRequest>,
+    ) -> Result<Response<GetCurrentUserResponse>, Status> {
+        auth_rpc::handle_get_current_user(request).await
     }
 
     async fn get_gateway_info(

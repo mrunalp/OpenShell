@@ -27,6 +27,15 @@ pub enum MinWorkspaceRole {
     Admin,
 }
 
+impl MinWorkspaceRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Admin => "admin",
+        }
+    }
+}
+
 /// Result of a successful workspace authorization check.
 #[derive(Debug)]
 pub struct AuthorizedWorkspace {
@@ -97,8 +106,13 @@ pub async fn authorize_workspace(
                 .unwrap_or(ProtoWorkspaceRole::Unspecified);
 
             if !role_satisfies(member_role, min_role) {
+                let workspace_arg = shell_quote_for_hint(&workspace);
+                let subject_arg = shell_quote_for_hint(&user.identity.subject);
+                let role = min_role.as_str();
                 return Err(Status::permission_denied(format!(
-                    "workspace role '{min_role:?}' required in workspace '{workspace}'"
+                    "workspace role '{role}' required in workspace '{workspace}'; ask a platform \
+                     admin to run: openshell workspace member add --workspace {workspace_arg} \
+                     --subject {subject_arg} --role {role}"
                 )));
             }
 
@@ -306,7 +320,11 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
-        assert!(err.message().contains("workspace role"));
+        assert_eq!(
+            err.message(),
+            "workspace role 'admin' required in workspace 'default'; ask a platform admin to run: \
+             openshell workspace member add --workspace 'default' --subject 'user-c' --role admin"
+        );
     }
 
     #[tokio::test]

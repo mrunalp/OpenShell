@@ -52,9 +52,13 @@ Use an `http://` endpoint only for trusted local port-forwarding or a protected 
 
 ```bash
 openshell status
+openshell whoami
 ```
 
-Confirm the gateway is reachable and shows a version.
+Confirm the gateway is reachable and shows a version. `openshell whoami`
+reports the identity validated by the gateway, including the subject an
+administrator uses for workspace membership. Add `--output json` for
+automation.
 
 ### Step 3: Create a sandbox
 
@@ -532,6 +536,7 @@ $ openshell sandbox upload --help
 |------|---------|
 | Register local port-forwarded gateway | `openshell gateway add http://127.0.0.1:8080 --local --name local` |
 | Check gateway health | `openshell status` |
+| Show authenticated identity and subject | `openshell whoami` |
 | List/switch gateways | `openshell gateway select [name]` |
 | Create sandbox (interactive) | `openshell sandbox create` |
 | Create sandbox with tool | `openshell sandbox create -- claude` |
