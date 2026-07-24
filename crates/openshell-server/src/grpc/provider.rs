@@ -1325,14 +1325,25 @@ use openshell_providers::{
 use std::sync::Arc;
 use tonic::{Request, Response};
 
+use crate::auth::workspace_authz::{MinWorkspaceRole, authorize_workspace, require_platform_admin};
+
 pub(super) async fn handle_create_provider(
     state: &Arc<ServerState>,
     request: Request<CreateProviderRequest>,
 ) -> Result<Response<ProviderResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &req.workspace)
         .await?
         .ensure_active()?;
+    authorize_workspace(
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     let Some(mut provider) = req.provider else {
         emit_provider_lifecycle(
             "custom",
@@ -1378,10 +1389,19 @@ pub(super) async fn handle_get_provider(
     state: &Arc<ServerState>,
     request: Request<GetProviderRequest>,
 ) -> Result<Response<ProviderResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &req.workspace)
         .await?
         .name;
+    authorize_workspace(
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
     let provider = get_provider_record(state.store.as_ref(), &workspace, &req.name).await?;
 
     Ok(Response::new(ProviderResponse {
@@ -1393,6 +1413,7 @@ pub(super) async fn handle_list_providers(
     state: &Arc<ServerState>,
     request: Request<ListProvidersRequest>,
 ) -> Result<Response<ListProvidersResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let request = request.into_inner();
     if request.all_workspaces && !request.workspace.is_empty() {
         return Err(Status::invalid_argument(
@@ -1402,6 +1423,7 @@ pub(super) async fn handle_list_providers(
     let limit = clamp_limit(request.limit, 100, MAX_PAGE_SIZE);
 
     let providers = if request.all_workspaces {
+        require_platform_admin(&state.admin_role, &principal)?;
         let all: Vec<Provider> = state
             .store
             .list_all_messages(limit, request.offset)
@@ -1413,6 +1435,14 @@ pub(super) async fn handle_list_providers(
             super::workspace::resolve_workspace(state.store.as_ref(), &request.workspace)
                 .await?
                 .name;
+        authorize_workspace(
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::User,
+        )
+        .await?;
         list_provider_records(state.store.as_ref(), &workspace, limit, request.offset).await?
     };
 
@@ -1428,11 +1458,22 @@ pub(super) async fn handle_list_provider_profiles(
     state: &Arc<ServerState>,
     request: Request<ListProviderProfilesRequest>,
 ) -> Result<Response<ListProviderProfilesResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let request = request.into_inner();
     let workspace =
         super::workspace::resolve_profile_workspace(state.store.as_ref(), &request.workspace)
             .await?
             .name;
+    if !workspace.is_empty() {
+        authorize_workspace(
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::User,
+        )
+        .await?;
+    }
     let limit = clamp_limit(request.limit, 100, MAX_PAGE_SIZE) as usize;
     let offset = request.offset as usize;
     let catalog = state
@@ -1454,11 +1495,22 @@ pub(super) async fn handle_get_provider_profile(
     state: &Arc<ServerState>,
     request: Request<GetProviderProfileRequest>,
 ) -> Result<Response<ProviderProfileResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
     let workspace =
         super::workspace::resolve_profile_workspace(state.store.as_ref(), &req.workspace)
             .await?
             .name;
+    if !workspace.is_empty() {
+        authorize_workspace(
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::User,
+        )
+        .await?;
+    }
     let id = req.id;
     let id = normalize_profile_id_request(&id)?;
     let catalog = state
@@ -1478,11 +1530,22 @@ pub(super) async fn handle_import_provider_profiles(
     state: &Arc<ServerState>,
     request: Request<ImportProviderProfilesRequest>,
 ) -> Result<Response<ImportProviderProfilesResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let request = request.into_inner();
     let workspace =
         super::workspace::resolve_profile_workspace(state.store.as_ref(), &request.workspace)
             .await?
             .ensure_active()?;
+    if !workspace.is_empty() {
+        authorize_workspace(
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::Admin,
+        )
+        .await?;
+    }
     let (profiles, mut diagnostics) = profiles_from_import_items(&request.profiles);
     add_empty_profile_set_diagnostic(&profiles, &mut diagnostics);
     let _sandbox_sync_guard = state.compute.sandbox_sync_guard().await;
@@ -1561,11 +1624,22 @@ pub(super) async fn handle_update_provider_profiles(
     state: &Arc<ServerState>,
     request: Request<UpdateProviderProfilesRequest>,
 ) -> Result<Response<UpdateProviderProfilesResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let request = request.into_inner();
     let workspace =
         super::workspace::resolve_profile_workspace(state.store.as_ref(), &request.workspace)
             .await?
             .ensure_active()?;
+    if !workspace.is_empty() {
+        authorize_workspace(
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::Admin,
+        )
+        .await?;
+    }
     let items = request.profile.into_iter().collect::<Vec<_>>();
     let (profiles, mut diagnostics) = profiles_from_import_items(&items);
     add_empty_profile_set_diagnostic(&profiles, &mut diagnostics);
@@ -1685,11 +1759,22 @@ pub(super) async fn handle_lint_provider_profiles(
     state: &Arc<ServerState>,
     request: Request<LintProviderProfilesRequest>,
 ) -> Result<Response<LintProviderProfilesResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let request = request.into_inner();
     let workspace =
         super::workspace::resolve_profile_workspace(state.store.as_ref(), &request.workspace)
             .await?
             .name;
+    if !workspace.is_empty() {
+        authorize_workspace(
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::User,
+        )
+        .await?;
+    }
     let (profiles, mut diagnostics) = profiles_from_import_items(&request.profiles);
     add_empty_profile_set_diagnostic(&profiles, &mut diagnostics);
     let catalog = state
@@ -1712,11 +1797,22 @@ pub(super) async fn handle_delete_provider_profile(
     state: &Arc<ServerState>,
     request: Request<DeleteProviderProfileRequest>,
 ) -> Result<Response<DeleteProviderProfileResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
     let workspace =
         super::workspace::resolve_profile_workspace(state.store.as_ref(), &req.workspace)
             .await?
             .name;
+    if !workspace.is_empty() {
+        authorize_workspace(
+            &state.store,
+            &state.admin_role,
+            &principal,
+            &workspace,
+            MinWorkspaceRole::Admin,
+        )
+        .await?;
+    }
     let id = req.id;
     let id = normalize_profile_id_request(&id)?;
     let _sandbox_sync_guard = state.compute.sandbox_sync_guard().await;
@@ -2322,10 +2418,19 @@ pub(super) async fn handle_update_provider(
     state: &Arc<ServerState>,
     request: Request<UpdateProviderRequest>,
 ) -> Result<Response<ProviderResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &req.workspace)
         .await?
         .name;
+    authorize_workspace(
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     let Some(mut provider) = req.provider else {
         emit_provider_lifecycle(
             "custom",
@@ -2371,10 +2476,19 @@ pub(super) async fn handle_get_provider_refresh_status(
     state: &Arc<ServerState>,
     request: Request<GetProviderRefreshStatusRequest>,
 ) -> Result<Response<GetProviderRefreshStatusResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let request = request.into_inner();
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &request.workspace)
         .await?
         .name;
+    authorize_workspace(
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::User,
+    )
+    .await?;
     if request.provider.trim().is_empty() {
         return Err(Status::invalid_argument("provider is required"));
     }
@@ -2415,10 +2529,19 @@ pub(super) async fn handle_configure_provider_refresh(
     state: &Arc<ServerState>,
     request: Request<ConfigureProviderRefreshRequest>,
 ) -> Result<Response<ConfigureProviderRefreshResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let request = request.into_inner();
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &request.workspace)
         .await?
         .name;
+    authorize_workspace(
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     let provider_name = request.provider.trim();
     let credential_key = request.credential_key.trim();
     if provider_name.is_empty() {
@@ -2704,10 +2827,19 @@ pub(super) async fn handle_rotate_provider_credential(
     state: &Arc<ServerState>,
     request: Request<RotateProviderCredentialRequest>,
 ) -> Result<Response<RotateProviderCredentialResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let request = request.into_inner();
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &request.workspace)
         .await?
         .name;
+    authorize_workspace(
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     let provider_name = request.provider.trim();
     let credential_key = request.credential_key.trim();
     if provider_name.is_empty() {
@@ -2763,10 +2895,19 @@ pub(super) async fn handle_delete_provider_refresh(
     state: &Arc<ServerState>,
     request: Request<DeleteProviderRefreshRequest>,
 ) -> Result<Response<DeleteProviderRefreshResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let request = request.into_inner();
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &request.workspace)
         .await?
         .name;
+    authorize_workspace(
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     let provider_name = request.provider.trim();
     let credential_key = request.credential_key.trim();
     if provider_name.is_empty() {
@@ -2831,10 +2972,19 @@ pub(super) async fn handle_delete_provider(
     state: &Arc<ServerState>,
     request: Request<DeleteProviderRequest>,
 ) -> Result<Response<DeleteProviderResponse>, Status> {
+    let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &req.workspace)
         .await?
         .name;
+    authorize_workspace(
+        &state.store,
+        &state.admin_role,
+        &principal,
+        &workspace,
+        MinWorkspaceRole::Admin,
+    )
+    .await?;
     let name = req.name;
     let provider_profile = provider_profile_for_name(state.store.as_ref(), &workspace, &name).await;
     let result = delete_provider_record(state.store.as_ref(), &workspace, &name).await;
@@ -2913,7 +3063,7 @@ fn telemetry_provider_profile(provider_type: &str) -> TelemetryProviderProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grpc::test_support::test_server_state;
+    use crate::grpc::test_support::{authed_request, test_server_state};
     use crate::grpc::{MAX_MAP_KEY_LEN, MAX_PROVIDER_TYPE_LEN};
     use crate::persistence::test_store;
     use openshell_core::proto::{
@@ -3080,7 +3230,7 @@ mod tests {
         }];
         handle_import_provider_profiles(
             state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(profile),
                     source: format!("{id}.yaml"),
@@ -3218,7 +3368,7 @@ mod tests {
         }];
         let response = handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(profile),
                     source: "grant-new.yaml".to_string(),
@@ -3246,7 +3396,7 @@ mod tests {
         let task = tokio::spawn(async move {
             handle_import_provider_profiles(
                 &task_state,
-                Request::new(ImportProviderProfilesRequest {
+                authed_request(ImportProviderProfilesRequest {
                     profiles: vec![ProviderProfileImportItem {
                         profile: Some(custom_profile("guarded-import")),
                         source: "guarded-import.yaml".to_string(),
@@ -3299,7 +3449,7 @@ mod tests {
         }];
         let response = handle_update_provider_profiles(
             &state,
-            Request::new(UpdateProviderProfilesRequest {
+            authed_request(UpdateProviderProfilesRequest {
                 profile: Some(ProviderProfileImportItem {
                     profile: Some(updated_profile.clone()),
                     source: "custom-api.yaml".to_string(),
@@ -3344,7 +3494,7 @@ mod tests {
 
         let built_in = handle_update_provider_profiles(
             &state,
-            Request::new(UpdateProviderProfilesRequest {
+            authed_request(UpdateProviderProfilesRequest {
                 profile: Some(ProviderProfileImportItem {
                     profile: Some(custom_profile("github")),
                     source: "github.yaml".to_string(),
@@ -3366,7 +3516,7 @@ mod tests {
 
         let missing = handle_update_provider_profiles(
             &state,
-            Request::new(UpdateProviderProfilesRequest {
+            authed_request(UpdateProviderProfilesRequest {
                 profile: Some(ProviderProfileImportItem {
                     profile: Some(custom_profile("missing-custom")),
                     source: "missing-custom.yaml".to_string(),
@@ -3398,7 +3548,7 @@ mod tests {
 
         let missing_version = handle_update_provider_profiles(
             &state,
-            Request::new(UpdateProviderProfilesRequest {
+            authed_request(UpdateProviderProfilesRequest {
                 profile: Some(ProviderProfileImportItem {
                     profile: Some(custom_profile("custom-api")),
                     source: "custom-api.yaml".to_string(),
@@ -3421,7 +3571,7 @@ mod tests {
         stale_profile.resource_version = 99;
         let stale_error = handle_update_provider_profiles(
             &state,
-            Request::new(UpdateProviderProfilesRequest {
+            authed_request(UpdateProviderProfilesRequest {
                 profile: Some(ProviderProfileImportItem {
                     profile: Some(stale_profile),
                     source: "custom-api.yaml".to_string(),
@@ -3470,7 +3620,7 @@ mod tests {
         edited_payload.display_name = "Wrong overwrite".to_string();
         let response = handle_update_provider_profiles(
             &state,
-            Request::new(UpdateProviderProfilesRequest {
+            authed_request(UpdateProviderProfilesRequest {
                 profile: Some(ProviderProfileImportItem {
                     profile: Some(edited_payload),
                     source: "profile-a.yaml".to_string(),
@@ -3553,7 +3703,7 @@ mod tests {
         }];
         let response = handle_update_provider_profiles(
             &state,
-            Request::new(UpdateProviderProfilesRequest {
+            authed_request(UpdateProviderProfilesRequest {
                 profile: Some(ProviderProfileImportItem {
                     profile: Some(profile),
                     source: "grant-updated.yaml".to_string(),
@@ -3675,7 +3825,7 @@ mod tests {
         profile.credentials = vec![refreshable_credential("access_token", credential_key)];
         handle_import_provider_profiles(
             state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(profile),
                     source: format!("{id}.yaml"),
@@ -3737,7 +3887,7 @@ mod tests {
         let state = test_server_state().await;
         let response = handle_list_provider_profiles(
             &state,
-            Request::new(ListProviderProfilesRequest {
+            authed_request(ListProviderProfilesRequest {
                 limit: 100,
                 offset: 0,
                 workspace: "default".to_string(),
@@ -3787,7 +3937,7 @@ mod tests {
         let state = test_server_state().await;
         let github = handle_get_provider_profile(
             &state,
-            Request::new(GetProviderProfileRequest {
+            authed_request(GetProviderProfileRequest {
                 id: "github".to_string(),
                 workspace: "default".to_string(),
             }),
@@ -3805,7 +3955,7 @@ mod tests {
 
         let generic_err = handle_get_provider_profile(
             &state,
-            Request::new(GetProviderProfileRequest {
+            authed_request(GetProviderProfileRequest {
                 id: "generic".to_string(),
                 workspace: "default".to_string(),
             }),
@@ -3820,7 +3970,7 @@ mod tests {
         let state = test_server_state().await;
         let response = handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("custom-api")),
                     source: "custom-api.yaml".to_string(),
@@ -3837,7 +3987,7 @@ mod tests {
 
         let listed = handle_list_provider_profiles(
             &state,
-            Request::new(ListProviderProfilesRequest {
+            authed_request(ListProviderProfilesRequest {
                 limit: 100,
                 offset: 0,
                 workspace: "default".to_string(),
@@ -3855,7 +4005,7 @@ mod tests {
 
         let fetched = handle_get_provider_profile(
             &state,
-            Request::new(GetProviderProfileRequest {
+            authed_request(GetProviderProfileRequest {
                 id: "custom-api".to_string(),
                 workspace: "default".to_string(),
             }),
@@ -3873,7 +4023,7 @@ mod tests {
         let state = test_server_state().await;
         let response = handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("github")),
                     source: "github.yaml".to_string(),
@@ -3901,7 +4051,7 @@ mod tests {
         let state = test_server_state().await;
         let response = handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("custom-llm")),
                     source: "custom-llm.yaml".to_string(),
@@ -3918,7 +4068,7 @@ mod tests {
 
         let imported = handle_get_provider_profile(
             &state,
-            Request::new(GetProviderProfileRequest {
+            authed_request(GetProviderProfileRequest {
                 id: "custom-llm".to_string(),
                 workspace: "default".to_string(),
             }),
@@ -3936,7 +4086,7 @@ mod tests {
         let state = test_server_state().await;
         let response = handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![
                     ProviderProfileImportItem {
                         profile: Some(custom_profile(" alex-api ")),
@@ -3974,7 +4124,7 @@ mod tests {
         let state = test_server_state().await;
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("alex-api")),
                     source: "alex-api.yaml".to_string(),
@@ -3987,7 +4137,7 @@ mod tests {
 
         let fetched = handle_get_provider_profile(
             &state,
-            Request::new(GetProviderProfileRequest {
+            authed_request(GetProviderProfileRequest {
                 id: " Alex-API ".to_string(),
                 workspace: "default".to_string(),
             }),
@@ -4001,7 +4151,7 @@ mod tests {
 
         let deleted = handle_delete_provider_profile(
             &state,
-            Request::new(DeleteProviderProfileRequest {
+            authed_request(DeleteProviderProfileRequest {
                 id: " Alex-API ".to_string(),
                 workspace: "default".to_string(),
             }),
@@ -4017,7 +4167,7 @@ mod tests {
         let state = test_server_state().await;
         let response = handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![
                     ProviderProfileImportItem {
                         profile: Some(custom_profile("bulk-one")),
@@ -4050,7 +4200,7 @@ mod tests {
         for id in ["bulk-one", "bulk-two"] {
             let missing = handle_get_provider_profile(
                 &state,
-                Request::new(GetProviderProfileRequest {
+                authed_request(GetProviderProfileRequest {
                     id: id.to_string(),
                     workspace: "default".to_string(),
                 }),
@@ -4067,7 +4217,7 @@ mod tests {
         let state = test_server_state().await;
         let response = handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(ProviderProfile {
                         id: "advanced-api".to_string(),
@@ -4115,7 +4265,7 @@ mod tests {
 
         let fetched = handle_get_provider_profile(
             &state,
-            Request::new(GetProviderProfileRequest {
+            authed_request(GetProviderProfileRequest {
                 id: "advanced-api".to_string(),
                 workspace: "default".to_string(),
             }),
@@ -4146,7 +4296,7 @@ mod tests {
         let state = test_server_state().await;
         let response = handle_lint_provider_profiles(
             &state,
-            Request::new(LintProviderProfilesRequest {
+            authed_request(LintProviderProfilesRequest {
                 profiles: vec![
                     ProviderProfileImportItem {
                         profile: Some(custom_profile("lint-one")),
@@ -4178,7 +4328,7 @@ mod tests {
         for id in ["lint-one", "lint-two"] {
             let missing = handle_get_provider_profile(
                 &state,
-                Request::new(GetProviderProfileRequest {
+                authed_request(GetProviderProfileRequest {
                     id: id.to_string(),
                     workspace: "default".to_string(),
                 }),
@@ -4195,7 +4345,7 @@ mod tests {
 
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("scoped-lint")),
                     source: "scoped-lint.yaml".to_string(),
@@ -4208,7 +4358,7 @@ mod tests {
 
         let conflict = handle_lint_provider_profiles(
             &state,
-            Request::new(LintProviderProfilesRequest {
+            authed_request(LintProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("scoped-lint")),
                     source: "scoped-lint.yaml".to_string(),
@@ -4242,7 +4392,7 @@ mod tests {
 
         let no_conflict = handle_lint_provider_profiles(
             &state,
-            Request::new(LintProviderProfilesRequest {
+            authed_request(LintProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("scoped-lint")),
                     source: "scoped-lint.yaml".to_string(),
@@ -4267,7 +4417,7 @@ mod tests {
         let state = test_server_state().await;
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("custom-api")),
                     source: "custom-api.yaml".to_string(),
@@ -4280,7 +4430,7 @@ mod tests {
 
         let builtin_err = handle_delete_provider_profile(
             &state,
-            Request::new(DeleteProviderProfileRequest {
+            authed_request(DeleteProviderProfileRequest {
                 id: "github".to_string(),
                 workspace: "default".to_string(),
             }),
@@ -4320,7 +4470,7 @@ mod tests {
 
         let in_use_err = handle_delete_provider_profile(
             &state,
-            Request::new(DeleteProviderProfileRequest {
+            authed_request(DeleteProviderProfileRequest {
                 id: "custom-api".to_string(),
                 workspace: "default".to_string(),
             }),
@@ -4366,7 +4516,7 @@ mod tests {
         let expires_at_ms = crate::persistence::current_time_ms() + 60_000;
         let response = handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -4389,7 +4539,7 @@ mod tests {
 
         let status = handle_get_provider_refresh_status(
             &state,
-            Request::new(GetProviderRefreshStatusRequest {
+            authed_request(GetProviderRefreshStatusRequest {
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 workspace: "default".to_string(),
@@ -4416,7 +4566,7 @@ mod tests {
 
         let deleted = handle_delete_provider_refresh(
             &state,
-            Request::new(DeleteProviderRefreshRequest {
+            authed_request(DeleteProviderRefreshRequest {
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 workspace: "default".to_string(),
@@ -4429,7 +4579,7 @@ mod tests {
 
         let status_after_delete = handle_get_provider_refresh_status(
             &state,
-            Request::new(GetProviderRefreshStatusRequest {
+            authed_request(GetProviderRefreshStatusRequest {
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 workspace: "default".to_string(),
@@ -4496,7 +4646,7 @@ mod tests {
 
         handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "provider-a".to_string(),
                 credential_key: "REFRESH_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -4574,7 +4724,7 @@ mod tests {
 
         handle_delete_provider_refresh(
             &state,
-            Request::new(DeleteProviderRefreshRequest {
+            authed_request(DeleteProviderRefreshRequest {
                 provider: "provider-a".to_string(),
                 credential_key: "REFRESH_TOKEN".to_string(),
                 workspace: "default".to_string(),
@@ -4629,7 +4779,7 @@ mod tests {
 
         let response = handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "vertex-sa".to_string(),
                 credential_key: "GOOGLE_VERTEX_AI_SERVICE_ACCOUNT_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::GoogleServiceAccountJwt as i32,
@@ -4699,7 +4849,7 @@ mod tests {
         let refresh_expires_at_ms = crate::persistence::current_time_ms() + 60_000;
         handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -4746,7 +4896,7 @@ mod tests {
 
         let deleted = handle_delete_provider_refresh(
             &state,
-            Request::new(DeleteProviderRefreshRequest {
+            authed_request(DeleteProviderRefreshRequest {
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 workspace: "default".to_string(),
@@ -4811,7 +4961,7 @@ mod tests {
         let refresh_expires_at_ms = crate::persistence::current_time_ms() + 60_000;
         handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "aws-delete".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -4860,7 +5010,7 @@ mod tests {
 
         handle_delete_provider_refresh(
             &state,
-            Request::new(DeleteProviderRefreshRequest {
+            authed_request(DeleteProviderRefreshRequest {
                 provider: "aws-delete".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 workspace: "default".to_string(),
@@ -5027,7 +5177,7 @@ mod tests {
 
         let err = handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "refreshing-graph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -5106,7 +5256,7 @@ mod tests {
 
         handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "first-graph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -5125,7 +5275,7 @@ mod tests {
 
         let err = handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "second-graph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -5183,7 +5333,7 @@ mod tests {
 
         let endpoint_override = handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -5208,7 +5358,7 @@ mod tests {
 
         let missing_material = handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -5261,7 +5411,7 @@ mod tests {
         ] {
             let err = handle_configure_provider_refresh(
                 &state,
-                Request::new(ConfigureProviderRefreshRequest {
+                authed_request(ConfigureProviderRefreshRequest {
                     provider: "msgraph".to_string(),
                     credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                     strategy: strategy as i32,
@@ -5292,7 +5442,7 @@ mod tests {
         let state = test_server_state().await;
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("custom-api")),
                     source: "custom-api.yaml".to_string(),
@@ -5305,7 +5455,7 @@ mod tests {
 
         let deleted = handle_delete_provider_profile(
             &state,
-            Request::new(DeleteProviderProfileRequest {
+            authed_request(DeleteProviderProfileRequest {
                 id: "custom-api".to_string(),
                 workspace: "default".to_string(),
             }),
@@ -5317,7 +5467,7 @@ mod tests {
 
         let missing = handle_get_provider_profile(
             &state,
-            Request::new(GetProviderProfileRequest {
+            authed_request(GetProviderProfileRequest {
                 id: "custom-api".to_string(),
                 workspace: "default".to_string(),
             }),
@@ -5341,7 +5491,7 @@ mod tests {
         let task = tokio::spawn(async move {
             handle_delete_provider_profile(
                 &task_state,
-                Request::new(DeleteProviderProfileRequest {
+                authed_request(DeleteProviderProfileRequest {
                     id: "guarded-delete".to_string(),
                     workspace: "default".to_string(),
                 }),
@@ -5702,7 +5852,7 @@ mod tests {
 
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(ProviderProfile {
                         id: "delegated-refresh-api".to_string(),
@@ -5791,7 +5941,7 @@ mod tests {
         ];
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(mixed_required_profile),
                     source: "mixed-required-api.yaml".to_string(),
@@ -5833,7 +5983,7 @@ mod tests {
         ];
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(optional_static_profile),
                     source: "optional-static-api.yaml".to_string(),
@@ -7156,7 +7306,7 @@ mod tests {
         provider.metadata.as_mut().unwrap().id = String::new();
         handle_create_provider(
             &state,
-            Request::new(CreateProviderRequest {
+            authed_request(CreateProviderRequest {
                 provider: Some(provider.clone()),
                 workspace: "default".to_string(),
             }),
@@ -7183,7 +7333,7 @@ mod tests {
         // Update should succeed
         let response = handle_update_provider(
             &state,
-            Request::new(UpdateProviderRequest {
+            authed_request(UpdateProviderRequest {
                 provider: Some(updated_provider.clone()),
                 credential_expires_at_ms: HashMap::new(),
                 workspace: "default".to_string(),
@@ -7226,7 +7376,7 @@ mod tests {
         provider.metadata.as_mut().unwrap().id = String::new();
         handle_create_provider(
             &state,
-            Request::new(CreateProviderRequest {
+            authed_request(CreateProviderRequest {
                 provider: Some(provider.clone()),
                 workspace: "default".to_string(),
             }),
@@ -7253,7 +7403,7 @@ mod tests {
         // Update should fail with ABORTED
         let err = handle_update_provider(
             &state,
-            Request::new(UpdateProviderRequest {
+            authed_request(UpdateProviderRequest {
                 provider: Some(stale_provider),
                 credential_expires_at_ms: HashMap::new(),
                 workspace: "default".to_string(),
@@ -7295,7 +7445,7 @@ mod tests {
         provider.metadata.as_mut().unwrap().id = String::new();
         handle_create_provider(
             &state,
-            Request::new(CreateProviderRequest {
+            authed_request(CreateProviderRequest {
                 provider: Some(provider.clone()),
                 workspace: "default".to_string(),
             }),
@@ -7325,7 +7475,7 @@ mod tests {
             let handle = tokio::spawn(async move {
                 handle_update_provider(
                     &state_clone,
-                    Request::new(UpdateProviderRequest {
+                    authed_request(UpdateProviderRequest {
                         provider: Some(updated),
                         credential_expires_at_ms: HashMap::new(),
                         workspace: "default".to_string(),
@@ -7410,7 +7560,7 @@ mod tests {
 
         let err = handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "my-aws".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -7481,7 +7631,7 @@ mod tests {
 
         let response = handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "my-aws-v2".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -7553,7 +7703,7 @@ mod tests {
 
         let err = handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "aws-endpoint-override".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -7646,7 +7796,7 @@ mod tests {
         // silently falling back to the gateway's ambient identity.
         let err = handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "aws-partial-source".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -7708,7 +7858,7 @@ mod tests {
 
         let err = handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "aws-lone-session".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -7780,7 +7930,7 @@ mod tests {
 
         handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "aws-outputs".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -7874,7 +8024,7 @@ mod tests {
 
         let err = handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "generic-no-profile".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -7942,7 +8092,7 @@ mod tests {
         // profile declares no refresh on it, so STS cannot be pinned there.
         let err = handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "aws-wrong-key".to_string(),
                 credential_key: "AWS_SECRET_ACCESS_KEY".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -8002,7 +8152,7 @@ mod tests {
 
         handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "aws-gate".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -8029,7 +8179,7 @@ mod tests {
 
         let err = handle_rotate_provider_credential(
             &state,
-            Request::new(RotateProviderCredentialRequest {
+            authed_request(RotateProviderCredentialRequest {
                 provider: "aws-gate".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 workspace: "default".to_string(),
@@ -8230,7 +8380,7 @@ mod tests {
 
         let err = handle_configure_provider_refresh(
             &state,
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: "new-aws-provider".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -8314,7 +8464,7 @@ mod tests {
             .unwrap();
 
         let configure = |provider: &str| {
-            Request::new(ConfigureProviderRefreshRequest {
+            authed_request(ConfigureProviderRefreshRequest {
                 provider: provider.to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -8514,7 +8664,7 @@ mod tests {
 
         let created_default = handle_create_provider(
             &state,
-            Request::new(CreateProviderRequest {
+            authed_request(CreateProviderRequest {
                 provider: Some({
                     let mut p = make_provider();
                     p.metadata = Some(openshell_core::proto::datamodel::v1::ObjectMeta {
@@ -8544,7 +8694,7 @@ mod tests {
 
         let created_beta = handle_create_provider(
             &state,
-            Request::new(CreateProviderRequest {
+            authed_request(CreateProviderRequest {
                 provider: Some({
                     let mut p = make_provider();
                     p.metadata = Some(openshell_core::proto::datamodel::v1::ObjectMeta {
@@ -8577,7 +8727,7 @@ mod tests {
         // Get in each workspace returns the correct provider.
         let got = handle_get_provider(
             &state,
-            Request::new(GetProviderRequest {
+            authed_request(GetProviderRequest {
                 name: "shared-name".to_string(),
                 workspace: "default".to_string(),
             }),
@@ -8589,7 +8739,7 @@ mod tests {
 
         let got = handle_get_provider(
             &state,
-            Request::new(GetProviderRequest {
+            authed_request(GetProviderRequest {
                 name: "shared-name".to_string(),
                 workspace: "beta".to_string(),
             }),
@@ -8602,7 +8752,7 @@ mod tests {
         // List is workspace-scoped.
         let listed = handle_list_providers(
             &state,
-            Request::new(ListProvidersRequest {
+            authed_request(ListProvidersRequest {
                 limit: 100,
                 offset: 0,
                 workspace: "default".to_string(),
@@ -8617,7 +8767,7 @@ mod tests {
 
         let listed = handle_list_providers(
             &state,
-            Request::new(ListProvidersRequest {
+            authed_request(ListProvidersRequest {
                 limit: 100,
                 offset: 0,
                 workspace: "beta".to_string(),
@@ -8633,7 +8783,7 @@ mod tests {
         // Delete in "default" does not affect "beta".
         let deleted = handle_delete_provider(
             &state,
-            Request::new(DeleteProviderRequest {
+            authed_request(DeleteProviderRequest {
                 name: "shared-name".to_string(),
                 workspace: "default".to_string(),
             }),
@@ -8645,7 +8795,7 @@ mod tests {
 
         let listed = handle_list_providers(
             &state,
-            Request::new(ListProvidersRequest {
+            authed_request(ListProvidersRequest {
                 limit: 100,
                 offset: 0,
                 workspace: "default".to_string(),
@@ -8659,7 +8809,7 @@ mod tests {
 
         let got = handle_get_provider(
             &state,
-            Request::new(GetProviderRequest {
+            authed_request(GetProviderRequest {
                 name: "shared-name".to_string(),
                 workspace: "beta".to_string(),
             }),
@@ -8673,7 +8823,7 @@ mod tests {
         // Re-create the "default" provider.
         handle_create_provider(
             &state,
-            Request::new(CreateProviderRequest {
+            authed_request(CreateProviderRequest {
                 provider: Some({
                     let mut p = make_provider();
                     p.metadata = Some(openshell_core::proto::datamodel::v1::ObjectMeta {
@@ -8696,7 +8846,7 @@ mod tests {
 
         let listed = handle_list_providers(
             &state,
-            Request::new(ListProvidersRequest {
+            authed_request(ListProvidersRequest {
                 limit: 100,
                 offset: 0,
                 workspace: String::new(),
@@ -8711,7 +8861,7 @@ mod tests {
         // all_workspaces with non-empty workspace is rejected.
         let err = handle_list_providers(
             &state,
-            Request::new(ListProvidersRequest {
+            authed_request(ListProvidersRequest {
                 limit: 100,
                 offset: 0,
                 workspace: "default".to_string(),
@@ -8894,7 +9044,7 @@ mod tests {
 
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("ws-custom")),
                     source: "ws-custom.yaml".to_string(),
@@ -8946,7 +9096,7 @@ mod tests {
             async move {
                 handle_import_provider_profiles(
                     &state,
-                    Request::new(ImportProviderProfilesRequest {
+                    authed_request(ImportProviderProfilesRequest {
                         profiles: vec![ProviderProfileImportItem {
                             profile: Some(custom_profile(&id)),
                             source: format!("{id}.yaml"),
@@ -8972,7 +9122,7 @@ mod tests {
             async move {
                 handle_list_provider_profiles(
                     &state,
-                    Request::new(ListProviderProfilesRequest {
+                    authed_request(ListProviderProfilesRequest {
                         limit: 200,
                         offset: 0,
                         workspace,
@@ -9023,7 +9173,7 @@ mod tests {
             async move {
                 handle_delete_provider_profile(
                     &state,
-                    Request::new(DeleteProviderProfileRequest { id, workspace }),
+                    authed_request(DeleteProviderProfileRequest { id, workspace }),
                 )
                 .await
                 .unwrap()
@@ -9046,7 +9196,7 @@ mod tests {
             async move {
                 handle_import_provider_profiles(
                     &state,
-                    Request::new(ImportProviderProfilesRequest {
+                    authed_request(ImportProviderProfilesRequest {
                         profiles: vec![ProviderProfileImportItem {
                             profile: Some(custom_profile(&id)),
                             source: format!("{id}.yaml"),
@@ -9083,7 +9233,7 @@ mod tests {
 
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("scoped-api")),
                     source: "scoped-api.yaml".to_string(),
@@ -9096,7 +9246,7 @@ mod tests {
 
         let resp = handle_list_provider_profiles(
             &state,
-            Request::new(ListProviderProfilesRequest {
+            authed_request(ListProviderProfilesRequest {
                 limit: 200,
                 offset: 0,
                 workspace: "default".to_string(),
@@ -9128,7 +9278,7 @@ mod tests {
 
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("platform-only")),
                     source: "platform-only.yaml".to_string(),
@@ -9141,7 +9291,7 @@ mod tests {
 
         let resp = handle_list_provider_profiles(
             &state,
-            Request::new(ListProviderProfilesRequest {
+            authed_request(ListProviderProfilesRequest {
                 limit: 200,
                 offset: 0,
                 workspace: "default".to_string(),
@@ -9165,7 +9315,7 @@ mod tests {
 
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("shadow-target")),
                     source: "shadow-target.yaml".to_string(),
@@ -9180,7 +9330,7 @@ mod tests {
         ws_profile.display_name = "Workspace Shadow".to_string();
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(ws_profile),
                     source: "shadow-target.yaml".to_string(),
@@ -9193,7 +9343,7 @@ mod tests {
 
         let resp = handle_get_provider_profile(
             &state,
-            Request::new(GetProviderProfileRequest {
+            authed_request(GetProviderProfileRequest {
                 id: "shadow-target".to_string(),
                 workspace: "default".to_string(),
             }),
@@ -9213,7 +9363,7 @@ mod tests {
 
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("shadow-warn")),
                     source: "shadow-warn.yaml".to_string(),
@@ -9226,7 +9376,7 @@ mod tests {
 
         let resp = handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("shadow-warn")),
                     source: "shadow-warn.yaml".to_string(),
@@ -9255,7 +9405,7 @@ mod tests {
 
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("global-only")),
                     source: "global-only.yaml".to_string(),
@@ -9268,7 +9418,7 @@ mod tests {
 
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(custom_profile("ws-only")),
                     source: "ws-only.yaml".to_string(),
@@ -9281,7 +9431,7 @@ mod tests {
 
         let resp = handle_list_provider_profiles(
             &state,
-            Request::new(ListProviderProfilesRequest {
+            authed_request(ListProviderProfilesRequest {
                 limit: 200,
                 offset: 0,
                 workspace: String::new(),
@@ -9309,7 +9459,7 @@ mod tests {
         platform_profile.display_name = "Platform Version".to_string();
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(platform_profile),
                     source: "scope-test.yaml".to_string(),
@@ -9324,7 +9474,7 @@ mod tests {
         ws_profile.display_name = "Workspace Version".to_string();
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(ws_profile),
                     source: "scope-test.yaml".to_string(),
@@ -9358,7 +9508,7 @@ mod tests {
         platform_profile.display_name = "Platform Version".to_string();
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(platform_profile),
                     source: "scope-test-ws.yaml".to_string(),
@@ -9373,7 +9523,7 @@ mod tests {
         ws_profile.display_name = "Workspace Version".to_string();
         handle_import_provider_profiles(
             &state,
-            Request::new(ImportProviderProfilesRequest {
+            authed_request(ImportProviderProfilesRequest {
                 profiles: vec![ProviderProfileImportItem {
                     profile: Some(ws_profile),
                     source: "scope-test-ws.yaml".to_string(),

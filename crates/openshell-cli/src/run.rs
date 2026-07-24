@@ -2026,11 +2026,17 @@ pub async fn sandbox_create(
         }
         None => None,
     };
-    let providers_v2_enabled = gateway_providers_v2_enabled(&mut client).await?;
+    let inferred_provider = inferred_provider_type(command);
+    let providers_v2_enabled =
+        if inferred_provider.is_some() && auto_providers_override != Some(false) {
+            gateway_providers_v2_enabled(&mut client).await?
+        } else {
+            false
+        };
     let inferred_types: Vec<String> = if providers_v2_enabled {
         Vec::new()
     } else {
-        inferred_provider_type(command).into_iter().collect()
+        inferred_provider.into_iter().collect()
     };
     let configured_providers = ensure_required_providers(
         &mut client,
