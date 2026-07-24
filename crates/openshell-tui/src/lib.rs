@@ -33,6 +33,9 @@ use event::{Event, EventHandler};
 
 /// Duration to show the splash screen before auto-dismissing.
 const SPLASH_DURATION: Duration = Duration::from_secs(3);
+const PROVIDER_PROFILE_SCOPE_WORKSPACE: &str = "workspace";
+
+type ProviderProfileCache = HashMap<(String, String), openshell_core::proto::ProviderProfile>;
 
 // Re-export for use by the CLI crate.
 pub use theme::ThemeMode;
@@ -2017,11 +2020,31 @@ fn provider_profile_cache_workspace<'a>(
     query_workspace: &'a str,
     profile: &openshell_core::proto::ProviderProfile,
 ) -> &'a str {
-    if profile.scope == "platform" {
-        ""
-    } else {
+    if profile.scope == PROVIDER_PROFILE_SCOPE_WORKSPACE {
         query_workspace
+    } else {
+        ""
     }
+}
+
+fn cache_provider_profile(
+    profiles: &mut ProviderProfileCache,
+    query_workspace: &str,
+    profile: openshell_core::proto::ProviderProfile,
+) {
+    let profile_workspace = provider_profile_cache_workspace(query_workspace, &profile).to_string();
+    profiles.insert((profile_workspace, profile.id.clone()), profile);
+}
+
+fn cached_provider_profile(
+    profiles: &ProviderProfileCache,
+    provider: &openshell_core::proto::Provider,
+) -> Option<openshell_core::proto::ProviderProfile> {
+    let profile_id = provider.r#type.clone();
+    profiles
+        .get(&(provider.profile_workspace.clone(), profile_id.clone()))
+        .or_else(|| profiles.get(&(String::new(), profile_id)))
+        .cloned()
 }
 
 async fn refresh_providers(app: &mut App) {
@@ -2048,37 +2071,36 @@ async fn refresh_providers(app: &mut App) {
             }
         };
 
-    let profiles: HashMap<(String, String), openshell_core::proto::ProviderProfile> =
-        if app.providers_v2_enabled {
-            let workspaces: std::collections::HashSet<String> = providers
-                .iter()
-                .map(|provider| provider_profile_query_workspace(provider).to_string())
-                .filter(|workspace| !workspace.is_empty())
-                .collect();
-            let mut all_profiles = HashMap::new();
-            for ws in &workspaces {
-                let req = openshell_core::proto::ListProviderProfilesRequest {
-                    limit: 100,
-                    offset: 0,
-                    workspace: ws.clone(),
-                };
-                if let Ok(Ok(resp)) = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    app.client.list_provider_profiles(req),
-                )
-                .await
-                {
-                    for profile in resp.into_inner().profiles {
-                        let profile_workspace =
-                            provider_profile_cache_workspace(ws, &profile).to_string();
-                        all_profiles.insert((profile_workspace, profile.id.clone()), profile);
-                    }
+    let profiles: ProviderProfileCache = if app.providers_v2_enabled {
+        let workspaces: std::collections::HashSet<String> = providers
+            .iter()
+            .map(|provider| provider_profile_query_workspace(provider).to_string())
+            // Legacy provider records can decode without an object workspace. Do not
+            // turn that missing context into a platform-scoped profile request.
+            .filter(|workspace| !workspace.is_empty())
+            .collect();
+        let mut all_profiles = HashMap::new();
+        for ws in &workspaces {
+            let req = openshell_core::proto::ListProviderProfilesRequest {
+                limit: 100,
+                offset: 0,
+                workspace: ws.clone(),
+            };
+            if let Ok(Ok(resp)) = tokio::time::timeout(
+                Duration::from_secs(5),
+                app.client.list_provider_profiles(req),
+            )
+            .await
+            {
+                for profile in resp.into_inner().profiles {
+                    cache_provider_profile(&mut all_profiles, ws, profile);
                 }
             }
-            all_profiles
-        } else {
-            HashMap::new()
-        };
+        }
+        all_profiles
+    } else {
+        HashMap::new()
+    };
 
     app.provider_count = providers.len();
     app.provider_entries = if app.providers_v2_enabled {
@@ -2086,9 +2108,7 @@ async fn refresh_providers(app: &mut App) {
             .iter()
             .cloned()
             .map(|provider| app::ProviderV2Entry {
-                profile: profiles
-                    .get(&(provider.profile_workspace.clone(), provider.r#type.clone()))
-                    .cloned(),
+                profile: cached_provider_profile(&profiles, &provider),
                 provider,
             })
             .collect()
@@ -2678,25 +2698,37 @@ mod provider_profile_workspace_tests {
     }
 
     #[test]
-    fn profile_cache_preserves_returned_scope() {
-        let platform = ProviderProfile {
-            scope: "platform".to_string(),
-            ..ProviderProfile::default()
-        };
-        let workspace = ProviderProfile {
-            scope: "workspace".to_string(),
-            ..ProviderProfile::default()
-        };
-        let builtin = ProviderProfile::default();
+    fn cached_profile_round_trip_covers_static_platform_and_workspace_scopes() {
+        let cases = [
+            ("", "", "static profile with platform provider scope"),
+            ("team-a", "", "static profile with workspace provider scope"),
+            ("", "platform", "platform profile"),
+            ("team-a", "workspace", "workspace profile"),
+        ];
 
-        assert_eq!(provider_profile_cache_workspace("team-a", &platform), "");
-        assert_eq!(
-            provider_profile_cache_workspace("team-a", &workspace),
-            "team-a"
-        );
-        assert_eq!(
-            provider_profile_cache_workspace("team-a", &builtin),
-            "team-a"
-        );
+        for (provider_workspace, response_scope, label) in cases {
+            let provider = Provider {
+                metadata: Some(ObjectMeta {
+                    workspace: "team-a".to_string(),
+                    ..ObjectMeta::default()
+                }),
+                r#type: "claude-code".to_string(),
+                profile_workspace: provider_workspace.to_string(),
+                ..Provider::default()
+            };
+            let profile = ProviderProfile {
+                id: "claude-code".to_string(),
+                scope: response_scope.to_string(),
+                ..ProviderProfile::default()
+            };
+            let mut profiles = ProviderProfileCache::new();
+
+            cache_provider_profile(&mut profiles, "team-a", profile);
+
+            assert!(
+                cached_provider_profile(&profiles, &provider).is_some(),
+                "{label} did not survive cache insertion and lookup"
+            );
+        }
     }
 }

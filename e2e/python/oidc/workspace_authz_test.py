@@ -532,6 +532,30 @@ def _platform_profile_rpcs() -> list[tuple[str, Callable]]:
     ]
 
 
+def _global_policy_read_rpcs() -> list[tuple[str, Callable]]:
+    """Policy history reads targeting the explicit global scope."""
+    return [
+        (
+            "GetSandboxPolicyStatus",
+            lambda s, m: s.GetSandboxPolicyStatus(
+                openshell_pb2.GetSandboxPolicyStatusRequest(
+                    workspace="", **{"global": True}
+                ),
+                metadata=m,
+            ),
+        ),
+        (
+            "ListSandboxPolicies",
+            lambda s, m: s.ListSandboxPolicies(
+                openshell_pb2.ListSandboxPoliciesRequest(
+                    workspace="", **{"global": True}
+                ),
+                metadata=m,
+            ),
+        ),
+    ]
+
+
 _cached_inference_stub: inference_pb2_grpc.InferenceStub | None = None
 
 
@@ -1120,6 +1144,52 @@ class TestWorkspaceAuthorization:
         ids=[r[0] for r in _platform_profile_rpcs()],
     )
     def test_platform_admin_can_access_platform_provider_profile_operations(
+        self,
+        rpc_name: str,
+        call: Callable,
+        admin_ctx: Any,
+    ) -> None:
+        stub, metadata = admin_ctx
+
+        try:
+            call(stub, metadata)
+        except grpc.RpcError as error:
+            assert error.code() != grpc.StatusCode.PERMISSION_DENIED, (
+                f"{rpc_name}: Platform Admin was denied: {error.details()}"
+            )
+
+    # ── Test 14: Global policy reads require Platform Admin ──────────
+
+    @pytest.mark.parametrize(
+        "rpc_name,call",
+        _global_policy_read_rpcs(),
+        ids=[r[0] for r in _global_policy_read_rpcs()],
+    )
+    def test_global_policy_reads_require_platform_admin(
+        self,
+        rpc_name: str,
+        call: Callable,
+        user_ctx: Any,
+    ) -> None:
+        stub, metadata, _ = user_ctx
+
+        with pytest.raises(grpc.RpcError) as exc_info:
+            call(stub, metadata)
+
+        assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED, (
+            f"{rpc_name}: expected PERMISSION_DENIED, got {exc_info.value.code()}"
+        )
+        assert "platform admin role required" in exc_info.value.details(), (
+            f"{rpc_name}: denial came from the wrong authorization layer: "
+            f"{exc_info.value.details()}"
+        )
+
+    @pytest.mark.parametrize(
+        "rpc_name,call",
+        _global_policy_read_rpcs(),
+        ids=[r[0] for r in _global_policy_read_rpcs()],
+    )
+    def test_platform_admin_can_access_global_policy_reads(
         self,
         rpc_name: str,
         call: Callable,
