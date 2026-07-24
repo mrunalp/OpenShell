@@ -401,9 +401,48 @@ async fn workspace_user_cannot_manage_members() {
 }
 
 #[tokio::test]
-async fn workspace_admin_can_manage_provider() {
-    const WORKSPACE: &str = "oidc-ws-admin-prov";
-    const PROVIDER: &str = "oidc-ws-admin-provider";
+async fn workspace_admin_can_read_workspace() {
+    const WORKSPACE: &str = "oidc-wsa-read";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "admin").await;
+
+    let get = assert_allowed(
+        &user,
+        &["workspace", "get", WORKSPACE],
+        "read an administered workspace",
+    )
+    .await;
+    assert!(combined_output(&get).contains(WORKSPACE));
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_can_create_sandbox() {
+    const WORKSPACE: &str = "oidc-wsa-create-sb";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "admin").await;
+    let _lifecycle = SANDBOX_LIFECYCLE_LOCK.lock().await;
+    assert_can_create_sandbox(&user, WORKSPACE, "oidc-wsa-create").await;
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_can_delete_sandbox() {
+    const WORKSPACE: &str = "oidc-wsa-delete-sb";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "admin").await;
+    let _lifecycle = SANDBOX_LIFECYCLE_LOCK.lock().await;
+    assert_can_delete_sandbox(&user, WORKSPACE, "oidc-wsa-delete").await;
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_can_create_provider() {
+    const WORKSPACE: &str = "oidc-wsa-create-pr";
+    const PROVIDER: &str = "oidc-wsa-create-provider";
     let user = login_identity(USER).await;
     let admin = login_identity(ADMIN).await;
     prepare_workspace(&admin, &user, WORKSPACE, "admin").await;
@@ -423,6 +462,40 @@ async fn workspace_admin_can_manage_provider() {
         "create a provider as workspace admin",
     )
     .await;
+
+    assert_workspace_allowed(
+        &admin,
+        WORKSPACE,
+        &["provider", "delete", PROVIDER],
+        "clean up the provider created by a workspace admin",
+    )
+    .await;
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_can_delete_provider() {
+    const WORKSPACE: &str = "oidc-wsa-delete-pr";
+    const PROVIDER: &str = "oidc-wsa-delete-provider";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "admin").await;
+    assert_workspace_allowed(
+        &admin,
+        WORKSPACE,
+        &[
+            "provider",
+            "create",
+            "--name",
+            PROVIDER,
+            "--type",
+            "generic",
+            "--credential",
+            "TOKEN=e2e-test-value",
+        ],
+        "create the provider deletion target",
+    )
+    .await;
     assert_workspace_allowed(
         &user,
         WORKSPACE,
@@ -430,6 +503,83 @@ async fn workspace_admin_can_manage_provider() {
         "delete a provider as workspace admin",
     )
     .await;
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_can_add_user_member() {
+    const WORKSPACE: &str = "oidc-wsa-add-user";
+    let workspace_admin = login_identity(USER).await;
+    let user = login_identity(USER_B).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &workspace_admin, WORKSPACE, "admin").await;
+
+    assert_allowed(
+        &workspace_admin,
+        &[
+            "workspace",
+            "member",
+            "add",
+            "--workspace",
+            WORKSPACE,
+            "--subject",
+            &user.subject,
+            "--role",
+            "user",
+        ],
+        "add a standard workspace member",
+    )
+    .await;
+    let members = assert_allowed(
+        &workspace_admin,
+        &["workspace", "member", "list", "--workspace", WORKSPACE],
+        "list workspace members after adding one",
+    )
+    .await;
+    assert!(combined_output(&members).contains(&user.subject));
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_can_remove_user_member() {
+    const WORKSPACE: &str = "oidc-wsa-rm-user";
+    let workspace_admin = login_identity(USER).await;
+    let user = login_identity(USER_B).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &workspace_admin, WORKSPACE, "admin").await;
+    assert_allowed(
+        &admin,
+        &[
+            "workspace",
+            "member",
+            "add",
+            "--workspace",
+            WORKSPACE,
+            "--subject",
+            &user.subject,
+            "--role",
+            "user",
+        ],
+        "create the workspace member removal target",
+    )
+    .await;
+
+    assert_allowed(
+        &workspace_admin,
+        &[
+            "workspace",
+            "member",
+            "remove",
+            "--workspace",
+            WORKSPACE,
+            "--subject",
+            &user.subject,
+        ],
+        "remove a standard workspace member",
+    )
+    .await;
+    let denied = run_session_cli(&user, &["workspace", "get", WORKSPACE]).await;
+    assert_non_member_denial(&denied, "read a workspace after removal by its admin");
     delete_workspace(&admin, WORKSPACE).await;
 }
 
@@ -456,6 +606,119 @@ async fn workspace_admin_cannot_grant_admin() {
     .await;
     assert_platform_admin_denial(&denied, "grant workspace admin");
     delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_cannot_create_workspace() {
+    const WORKSPACE: &str = "oidc-wsa-no-create";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "admin").await;
+
+    let denied =
+        run_session_cli(&user, &["workspace", "create", "--name", "oidc-wsa-denied"]).await;
+    assert_admin_role_denial(&denied, "create a workspace as workspace admin");
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_cannot_delete_workspace() {
+    const WORKSPACE: &str = "oidc-wsa-no-delete";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "admin").await;
+
+    let denied = run_session_cli(&user, &["workspace", "delete", WORKSPACE]).await;
+    assert_admin_role_denial(&denied, "delete an administered workspace");
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_cannot_inspect_gateway() {
+    const WORKSPACE: &str = "oidc-wsa-no-gw-info";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "admin").await;
+
+    let denied = run_workspace_cli(&user, WORKSPACE, &["gateway", "info"]).await;
+    assert_admin_role_denial(&denied, "inspect gateway info as workspace admin");
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_cannot_read_another_workspace() {
+    const WORKSPACE_A: &str = "oidc-wsa-xread-a";
+    const WORKSPACE_B: &str = "oidc-wsa-xread-b";
+    let (admin, workspace_admin, _user_b) =
+        prepare_isolated_workspaces_with_admin(WORKSPACE_A, WORKSPACE_B).await;
+
+    let denied = run_session_cli(&workspace_admin, &["workspace", "get", WORKSPACE_B]).await;
+    assert_non_member_denial(&denied, "read another workspace as workspace admin");
+
+    delete_workspace(&admin, WORKSPACE_B).await;
+    delete_workspace(&admin, WORKSPACE_A).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_cannot_manage_another_workspace_members() {
+    const WORKSPACE_A: &str = "oidc-wsa-xmem-a";
+    const WORKSPACE_B: &str = "oidc-wsa-xmem-b";
+    let (admin, workspace_admin, _user_b) =
+        prepare_isolated_workspaces_with_admin(WORKSPACE_A, WORKSPACE_B).await;
+
+    let denied = run_session_cli(
+        &workspace_admin,
+        &[
+            "workspace",
+            "member",
+            "add",
+            "--workspace",
+            WORKSPACE_B,
+            "--subject",
+            "oidc-fake-member",
+            "--role",
+            "user",
+        ],
+    )
+    .await;
+    assert_non_member_denial(
+        &denied,
+        "manage another workspace's members as workspace admin",
+    );
+
+    delete_workspace(&admin, WORKSPACE_B).await;
+    delete_workspace(&admin, WORKSPACE_A).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_cannot_manage_another_workspace_providers() {
+    const WORKSPACE_A: &str = "oidc-wsa-xprov-a";
+    const WORKSPACE_B: &str = "oidc-wsa-xprov-b";
+    let (admin, workspace_admin, _user_b) =
+        prepare_isolated_workspaces_with_admin(WORKSPACE_A, WORKSPACE_B).await;
+
+    let denied = run_workspace_cli(
+        &workspace_admin,
+        WORKSPACE_B,
+        &[
+            "provider",
+            "create",
+            "--name",
+            "oidc-wsa-xprovider",
+            "--type",
+            "generic",
+            "--credential",
+            "TOKEN=e2e-test-value",
+        ],
+    )
+    .await;
+    assert_non_member_denial(
+        &denied,
+        "manage another workspace's providers as workspace admin",
+    );
+
+    delete_workspace(&admin, WORKSPACE_B).await;
+    delete_workspace(&admin, WORKSPACE_A).await;
 }
 
 #[tokio::test]
@@ -994,6 +1257,18 @@ async fn prepare_isolated_workspaces(
     prepare_workspace(&admin, &user_a, workspace_a, "user").await;
     prepare_workspace(&admin, &user_b, workspace_b, "user").await;
     (admin, user_a, user_b)
+}
+
+async fn prepare_isolated_workspaces_with_admin(
+    workspace_a: &str,
+    workspace_b: &str,
+) -> (LoginSession, LoginSession, LoginSession) {
+    let admin = login_identity(ADMIN).await;
+    let workspace_admin = login_identity(USER).await;
+    let user_b = login_identity(USER_B).await;
+    prepare_workspace(&admin, &workspace_admin, workspace_a, "admin").await;
+    prepare_workspace(&admin, &user_b, workspace_b, "user").await;
+    (admin, workspace_admin, user_b)
 }
 
 async fn delete_workspace(admin: &LoginSession, workspace: &str) {
