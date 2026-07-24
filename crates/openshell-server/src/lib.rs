@@ -246,6 +246,9 @@ pub(crate) async fn run_server(
         guest_tls,
     } = startup;
 
+    auth::descriptor_authz::init()
+        .map_err(|error| Error::config(format!("invalid gRPC authorization metadata: {error}")))?;
+
     let database_url = config.database_url.trim();
     if database_url.is_empty() {
         return Err(Error::config("database_url is required"));

@@ -69,10 +69,8 @@ pub struct DescriptorAuthTable {
     entries: HashMap<String, DescriptorAuthEntry>,
 }
 
-static TABLE: LazyLock<DescriptorAuthTable> = LazyLock::new(|| {
-    DescriptorAuthTable::from_descriptor_set(openshell_core::FILE_DESCRIPTOR_SET)
-        .expect("failed to build auth table from descriptor set")
-});
+static TABLE: LazyLock<Result<DescriptorAuthTable, String>> =
+    LazyLock::new(|| DescriptorAuthTable::from_descriptor_set(openshell_core::FILE_DESCRIPTOR_SET));
 
 impl DescriptorAuthTable {
     fn from_descriptor_set(bytes: &[u8]) -> Result<Self, String> {
@@ -204,13 +202,30 @@ fn non_empty(s: String) -> Option<String> {
 
 /// Look up descriptor-pool auth metadata for a gRPC method path.
 pub fn lookup(method: &str) -> Option<&'static DescriptorAuthEntry> {
-    TABLE.entries.get(method)
+    TABLE
+        .as_ref()
+        .expect("descriptor authorization table must be validated during startup")
+        .entries
+        .get(method)
+}
+
+/// Build and validate the descriptor authorization table.
+///
+/// The gateway calls this before binding any listener so invalid annotations
+/// fail startup rather than panicking on the first gRPC request.
+pub fn init() -> Result<(), String> {
+    TABLE.as_ref().map(|_| ()).map_err(Clone::clone)
 }
 
 /// Iterator over all registered method paths.
 #[cfg(test)]
 pub fn all_paths() -> impl Iterator<Item = &'static str> {
-    TABLE.entries.keys().map(String::as_str)
+    TABLE
+        .as_ref()
+        .expect("descriptor authorization table must be valid in tests")
+        .entries
+        .keys()
+        .map(String::as_str)
 }
 
 #[cfg(test)]
@@ -223,6 +238,8 @@ mod tests {
     fn every_proto_rpc_has_authorization_option() {
         let pool = DescriptorPool::decode(openshell_core::FILE_DESCRIPTOR_SET)
             .expect("decode descriptor set");
+        let table = DescriptorAuthTable::from_descriptor_set(openshell_core::FILE_DESCRIPTOR_SET)
+            .expect("every RPC authorization annotation must be complete and valid");
 
         let mut missing: Vec<String> = Vec::new();
 
@@ -234,7 +251,7 @@ mod tests {
             }
             for method in service.methods() {
                 let path = format!("/{}.{}/{}", package, service.name(), method.name());
-                if lookup(&path).is_none() {
+                if !table.entries.contains_key(&path) {
                     missing.push(path);
                 }
             }
