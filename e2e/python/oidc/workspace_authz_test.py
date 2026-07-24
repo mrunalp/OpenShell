@@ -92,6 +92,28 @@ def _remove_member(
 # The callable constructs a minimal valid request for the given RPC.
 
 
+def _assert_non_member_denial(
+    error: grpc.RpcError,
+    workspace: str,
+    subject: str,
+    rpc_name: str,
+) -> None:
+    assert error.code() == grpc.StatusCode.PERMISSION_DENIED, (
+        f"{rpc_name}: expected PERMISSION_DENIED, got {error.code()}"
+    )
+    details = error.details()
+    assert f"not a member of workspace '{workspace}'" in details, (
+        f"{rpc_name}: denial came from the wrong authorization layer: {details}"
+    )
+    command = (
+        "openshell workspace member add "
+        f"--workspace '{workspace}' --subject '{subject}' --role user"
+    )
+    assert command in details, (
+        f"{rpc_name}: denial omitted the actionable membership command: {details}"
+    )
+
+
 def _workspace_rpcs() -> list[tuple[str, Callable]]:
     """All workspace-scoped RPCs that accept a workspace field."""
     return [
@@ -649,12 +671,10 @@ class TestWorkspaceAuthorization:
         call: Callable,
         user_ctx: Any,
     ) -> None:
-        stub, metadata, _ = user_ctx
+        stub, metadata, user_sub = user_ctx
         with pytest.raises(grpc.RpcError) as exc_info:
             call(stub, metadata)
-        assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED, (
-            f"{rpc_name}: expected PERMISSION_DENIED, got {exc_info.value.code()}"
-        )
+        _assert_non_member_denial(exc_info.value, WS, user_sub, rpc_name)
 
     # ── Test 2: Non-member rejection — dual-mode RPCs ────────────────
 
@@ -662,13 +682,18 @@ class TestWorkspaceAuthorization:
         self,
         user_ctx: Any,
     ) -> None:
-        stub, metadata, _ = user_ctx
+        stub, metadata, user_sub = user_ctx
         with pytest.raises(grpc.RpcError) as exc_info:
             stub.UpdateConfig(
                 openshell_pb2.UpdateConfigRequest(name="nonexistent", workspace=WS),
                 metadata=metadata,
             )
-        assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+        _assert_non_member_denial(
+            exc_info.value,
+            WS,
+            user_sub,
+            "UpdateConfig",
+        )
 
     # ── Test 3: Sandbox log authorization uses persisted workspace ───
 

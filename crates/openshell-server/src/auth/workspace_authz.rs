@@ -14,6 +14,10 @@ use tonic::Status;
 
 use crate::persistence::Store;
 
+fn shell_quote_for_hint(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 /// Minimum workspace-level role required by a handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MinWorkspaceRole {
@@ -80,8 +84,12 @@ pub async fn authorize_workspace(
                 .map_err(|e| Status::internal(format!("membership lookup failed: {e}")))?;
 
             let Some(member) = member else {
+                let workspace_arg = shell_quote_for_hint(&workspace);
+                let subject_arg = shell_quote_for_hint(&user.identity.subject);
                 return Err(Status::permission_denied(format!(
-                    "not a member of workspace '{workspace}'"
+                    "not a member of workspace '{workspace}'; ask a platform admin to run: \
+                     openshell workspace member add --workspace {workspace_arg} \
+                     --subject {subject_arg} --role user"
                 )));
             };
 
@@ -316,7 +324,32 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
-        assert!(err.message().contains("not a member"));
+        assert_eq!(
+            err.message(),
+            "not a member of workspace 'default'; ask a platform admin to run: \
+             openshell workspace member add --workspace 'default' --subject 'stranger' --role user"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_member_remediation_shell_quotes_untrusted_subject() {
+        let store = test_store().await;
+        let principal = user_principal("user'; echo pwned; '$(id)", &["openshell-user"]);
+        let result = authorize_workspace(
+            &store,
+            "openshell-admin",
+            &principal,
+            "team-a",
+            MinWorkspaceRole::User,
+        )
+        .await;
+
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(
+            err.message()
+                .contains("--subject 'user'\"'\"'; echo pwned; '\"'\"'$(id)' --role user")
+        );
     }
 
     #[tokio::test]
