@@ -2005,6 +2005,25 @@ async fn refresh_workspaces(app: &mut App) {
     }
 }
 
+fn provider_profile_query_workspace(provider: &openshell_core::proto::Provider) -> &str {
+    if provider.profile_workspace.is_empty() {
+        provider.object_workspace()
+    } else {
+        &provider.profile_workspace
+    }
+}
+
+fn provider_profile_cache_workspace<'a>(
+    query_workspace: &'a str,
+    profile: &openshell_core::proto::ProviderProfile,
+) -> &'a str {
+    if profile.scope == "platform" {
+        ""
+    } else {
+        query_workspace
+    }
+}
+
 async fn refresh_providers(app: &mut App) {
     let req = openshell_core::proto::ListProvidersRequest {
         limit: 100,
@@ -2033,7 +2052,8 @@ async fn refresh_providers(app: &mut App) {
         if app.providers_v2_enabled {
             let workspaces: std::collections::HashSet<String> = providers
                 .iter()
-                .map(|p| p.profile_workspace.clone())
+                .map(|provider| provider_profile_query_workspace(provider).to_string())
+                .filter(|workspace| !workspace.is_empty())
                 .collect();
             let mut all_profiles = HashMap::new();
             for ws in &workspaces {
@@ -2049,7 +2069,9 @@ async fn refresh_providers(app: &mut App) {
                 .await
                 {
                     for profile in resp.into_inner().profiles {
-                        all_profiles.insert((ws.clone(), profile.id.clone()), profile);
+                        let profile_workspace =
+                            provider_profile_cache_workspace(ws, &profile).to_string();
+                        all_profiles.insert((profile_workspace, profile.id.clone()), profile);
                     }
                 }
             }
@@ -2633,4 +2655,48 @@ fn days_to_ymd(days: i64) -> (i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod provider_profile_workspace_tests {
+    use super::*;
+    use openshell_core::proto::datamodel::v1::ObjectMeta;
+    use openshell_core::proto::{Provider, ProviderProfile};
+
+    #[test]
+    fn platform_profile_queries_through_provider_workspace() {
+        let provider = Provider {
+            metadata: Some(ObjectMeta {
+                workspace: "team-a".to_string(),
+                ..ObjectMeta::default()
+            }),
+            profile_workspace: String::new(),
+            ..Provider::default()
+        };
+
+        assert_eq!(provider_profile_query_workspace(&provider), "team-a");
+    }
+
+    #[test]
+    fn profile_cache_preserves_returned_scope() {
+        let platform = ProviderProfile {
+            scope: "platform".to_string(),
+            ..ProviderProfile::default()
+        };
+        let workspace = ProviderProfile {
+            scope: "workspace".to_string(),
+            ..ProviderProfile::default()
+        };
+        let builtin = ProviderProfile::default();
+
+        assert_eq!(provider_profile_cache_workspace("team-a", &platform), "");
+        assert_eq!(
+            provider_profile_cache_workspace("team-a", &workspace),
+            "team-a"
+        );
+        assert_eq!(
+            provider_profile_cache_workspace("team-a", &builtin),
+            "team-a"
+        );
+    }
 }
