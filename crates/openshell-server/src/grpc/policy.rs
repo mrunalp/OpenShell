@@ -2466,20 +2466,23 @@ pub(super) async fn handle_get_sandbox_logs(
 ) -> Result<Response<GetSandboxLogsResponse>, Status> {
     let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
-    let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &req.workspace)
-        .await?
-        .name;
-    authorize_workspace(
-        &state.store,
-        &state.admin_role,
-        &principal,
-        &workspace,
-        MinWorkspaceRole::User,
-    )
-    .await?;
     if req.sandbox_id.is_empty() {
         return Err(Status::invalid_argument("sandbox_id is required"));
     }
+    let sandbox = state
+        .store
+        .get_message::<Sandbox>(&req.sandbox_id)
+        .await
+        .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
+        .ok_or_else(|| Status::not_found("sandbox not found"))?;
+    authorize_sandbox_workspace(
+        &state.store,
+        &state.admin_role,
+        &principal,
+        sandbox.object_workspace(),
+        MinWorkspaceRole::User,
+    )
+    .await?;
 
     let lines = if req.lines == 0 { 2000 } else { req.lines };
     let tail = state.tracing_log_bus.tail(&req.sandbox_id, lines as usize);
@@ -4646,6 +4649,58 @@ mod tests {
             },
         }));
         assert!(!is_sandbox_caller(&req));
+    }
+
+    #[tokio::test]
+    async fn get_sandbox_logs_authorizes_persisted_sandbox_workspace() {
+        use openshell_core::proto::datamodel::v1::ObjectMeta;
+        use openshell_core::proto::{WorkspaceMember, WorkspaceRole};
+
+        let mut state = test_server_state().await;
+        Arc::get_mut(&mut state).unwrap().admin_role = "openshell-admin".to_string();
+        let sandbox = Sandbox {
+            metadata: Some(ObjectMeta {
+                id: "sandbox-b-id".to_string(),
+                name: "sandbox-b".to_string(),
+                created_at_ms: 1_000_000,
+                labels: HashMap::new(),
+                resource_version: 0,
+                annotations: HashMap::new(),
+                workspace: "workspace-b".to_string(),
+                deletion_timestamp_ms: 0,
+            }),
+            ..Sandbox::default()
+        };
+        state.store.put_message(&sandbox).await.unwrap();
+
+        let member = WorkspaceMember {
+            metadata: Some(ObjectMeta {
+                id: "member-a-id".to_string(),
+                name: "test-user".to_string(),
+                created_at_ms: 1_000_000,
+                labels: HashMap::new(),
+                resource_version: 0,
+                annotations: HashMap::new(),
+                workspace: "default".to_string(),
+                deletion_timestamp_ms: 0,
+            }),
+            principal_subject: "test-user".to_string(),
+            role: WorkspaceRole::User.into(),
+        };
+        state.store.put_message(&member).await.unwrap();
+
+        let error = handle_get_sandbox_logs(
+            &state,
+            with_user(Request::new(GetSandboxLogsRequest {
+                sandbox_id: "sandbox-b-id".to_string(),
+                workspace: "default".to_string(),
+                ..GetSandboxLogsRequest::default()
+            })),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code(), Code::PermissionDenied);
     }
 
     #[test]

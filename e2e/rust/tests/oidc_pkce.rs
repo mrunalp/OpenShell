@@ -8,7 +8,7 @@
 //! The test replaces Linux's `xdg-open` with a recorder, then drives the
 //! captured Keycloak login URL with curl. This exercises the same loopback
 //! callback and token exchange used by a real browser without requiring a GUI.
-//! It logs in as both fixture users and verifies standard-user and admin-only
+//! It logs in as the fixture identities and verifies standard-user and admin-only
 //! actions against a live Docker- or Podman-backed gateway.
 
 use std::collections::HashMap;
@@ -47,6 +47,13 @@ const USER: IdentityScenario = IdentityScenario {
     gateway_name: "oidc-pkce-user",
     username: "user@test",
     password: "user",
+    expected_role: "openshell-user",
+};
+
+const USER_B: IdentityScenario = IdentityScenario {
+    gateway_name: "oidc-pkce-user-b",
+    username: "user-b@test",
+    password: "user-b",
     expected_role: "openshell-user",
 };
 
@@ -476,6 +483,138 @@ async fn membership_removal_revokes_workspace_access() {
     delete_workspace(&admin, WORKSPACE).await;
 }
 
+#[tokio::test]
+async fn workspace_user_cannot_read_another_users_workspace() {
+    const WORKSPACE_A: &str = "oidc-xread-a";
+    const WORKSPACE_B: &str = "oidc-xread-b";
+    let (admin, user_a, _user_b) = prepare_isolated_workspaces(WORKSPACE_A, WORKSPACE_B).await;
+
+    let denied = run_session_cli(&user_a, &["workspace", "get", WORKSPACE_B]).await;
+    assert_non_member_denial(&denied, "read another user's workspace");
+
+    delete_workspace(&admin, WORKSPACE_B).await;
+    delete_workspace(&admin, WORKSPACE_A).await;
+}
+
+#[tokio::test]
+async fn second_workspace_user_cannot_read_first_users_workspace() {
+    const WORKSPACE_A: &str = "oidc-xread2-a";
+    const WORKSPACE_B: &str = "oidc-xread2-b";
+    let (admin, _user_a, user_b) = prepare_isolated_workspaces(WORKSPACE_A, WORKSPACE_B).await;
+
+    let denied = run_session_cli(&user_b, &["workspace", "get", WORKSPACE_A]).await;
+    assert_non_member_denial(&denied, "read another user's workspace");
+
+    delete_workspace(&admin, WORKSPACE_B).await;
+    delete_workspace(&admin, WORKSPACE_A).await;
+}
+
+#[tokio::test]
+async fn workspace_list_hides_another_users_workspace() {
+    const WORKSPACE_A: &str = "oidc-xlist-a";
+    const WORKSPACE_B: &str = "oidc-xlist-b";
+    let (admin, user_a, _user_b) = prepare_isolated_workspaces(WORKSPACE_A, WORKSPACE_B).await;
+
+    let listed = assert_allowed(
+        &user_a,
+        &["workspace", "list", "--output", "json"],
+        "list visible workspaces",
+    )
+    .await;
+    let output = combined_output(&listed);
+    assert!(
+        output.contains(WORKSPACE_A),
+        "workspace list should contain the caller's workspace:\n{output}"
+    );
+    assert!(
+        !output.contains(WORKSPACE_B),
+        "workspace list exposed another user's workspace:\n{output}"
+    );
+
+    delete_workspace(&admin, WORKSPACE_B).await;
+    delete_workspace(&admin, WORKSPACE_A).await;
+}
+
+#[tokio::test]
+async fn workspace_user_cannot_list_another_workspace_sandboxes() {
+    const WORKSPACE_A: &str = "oidc-xsbox-a";
+    const WORKSPACE_B: &str = "oidc-xsbox-b";
+    let (admin, user_a, _user_b) = prepare_isolated_workspaces(WORKSPACE_A, WORKSPACE_B).await;
+
+    let denied = run_workspace_cli(
+        &user_a,
+        WORKSPACE_B,
+        &["sandbox", "list", "--output", "json"],
+    )
+    .await;
+    assert_non_member_denial(&denied, "list another workspace's sandboxes");
+
+    delete_workspace(&admin, WORKSPACE_B).await;
+    delete_workspace(&admin, WORKSPACE_A).await;
+}
+
+#[tokio::test]
+async fn workspace_user_cannot_create_sandbox_in_another_workspace() {
+    const WORKSPACE_A: &str = "oidc-xcreate-a";
+    const WORKSPACE_B: &str = "oidc-xcreate-b";
+    let (admin, user_a, _user_b) = prepare_isolated_workspaces(WORKSPACE_A, WORKSPACE_B).await;
+
+    let denied = run_workspace_cli(
+        &user_a,
+        WORKSPACE_B,
+        &[
+            "sandbox",
+            "create",
+            "--name",
+            "oidc-xcreate-denied",
+            "--no-tty",
+            "--",
+            "echo",
+            "denied",
+        ],
+    )
+    .await;
+    assert_non_member_denial(&denied, "create a sandbox in another workspace");
+
+    delete_workspace(&admin, WORKSPACE_B).await;
+    delete_workspace(&admin, WORKSPACE_A).await;
+}
+
+#[tokio::test]
+async fn workspace_user_cannot_list_another_workspace_providers() {
+    const WORKSPACE_A: &str = "oidc-xprov-a";
+    const WORKSPACE_B: &str = "oidc-xprov-b";
+    let (admin, user_a, _user_b) = prepare_isolated_workspaces(WORKSPACE_A, WORKSPACE_B).await;
+
+    let denied = run_workspace_cli(
+        &user_a,
+        WORKSPACE_B,
+        &["provider", "list", "--output", "json"],
+    )
+    .await;
+    assert_non_member_denial(&denied, "list another workspace's providers");
+
+    delete_workspace(&admin, WORKSPACE_B).await;
+    delete_workspace(&admin, WORKSPACE_A).await;
+}
+
+#[tokio::test]
+async fn workspace_user_cannot_list_another_workspace_members() {
+    const WORKSPACE_A: &str = "oidc-xmember-a";
+    const WORKSPACE_B: &str = "oidc-xmember-b";
+    let (admin, user_a, _user_b) = prepare_isolated_workspaces(WORKSPACE_A, WORKSPACE_B).await;
+
+    let denied = run_session_cli(
+        &user_a,
+        &["workspace", "member", "list", "--workspace", WORKSPACE_B],
+    )
+    .await;
+    assert_non_member_denial(&denied, "list another workspace's members");
+
+    delete_workspace(&admin, WORKSPACE_B).await;
+    delete_workspace(&admin, WORKSPACE_A).await;
+}
+
 async fn login_identity(identity: IdentityScenario) -> LoginSession {
     let issuer = std::env::var("OPENSHELL_E2E_OIDC_ISSUER")
         .unwrap_or_else(|_| "http://localhost:8180/realms/openshell".to_string());
@@ -843,6 +982,18 @@ async fn prepare_workspace(
         "add a workspace member",
     )
     .await;
+}
+
+async fn prepare_isolated_workspaces(
+    workspace_a: &str,
+    workspace_b: &str,
+) -> (LoginSession, LoginSession, LoginSession) {
+    let admin = login_identity(ADMIN).await;
+    let user_a = login_identity(USER).await;
+    let user_b = login_identity(USER_B).await;
+    prepare_workspace(&admin, &user_a, workspace_a, "user").await;
+    prepare_workspace(&admin, &user_b, workspace_b, "user").await;
+    (admin, user_a, user_b)
 }
 
 async fn delete_workspace(admin: &LoginSession, workspace: &str) {

@@ -391,6 +391,22 @@
         }
       ],
       "realmRoles": ["openshell-user"]
+    },
+    {
+      "username": "user-b@test",
+      "email": "user-b@test",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Second",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "user-b",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["openshell-user"]
     }
   ]
 }
