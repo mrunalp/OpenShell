@@ -19,6 +19,12 @@ const AUTHORIZATION_EXTENSION: &str = "openshell.options.v1.authorization";
 /// Gateway-served protobuf packages.
 const GATEWAY_PACKAGES: &[&str] = &["openshell.v1", "openshell.inference.v1"];
 
+/// Bearer-authenticated methods that deliberately require no role or scope.
+///
+/// Keep this list explicit so an incomplete authorization annotation cannot
+/// silently turn a future RPC into an authentication-only endpoint.
+const AUTH_ONLY_METHODS: &[&str] = &["/openshell.v1.OpenShell/GetCurrentUser"];
+
 /// Per-method authorization entry decoded from proto annotations.
 #[derive(Debug, Clone)]
 pub struct DescriptorAuthEntry {
@@ -122,6 +128,14 @@ impl DescriptorAuthTable {
                 let global_role = non_empty(global_role_str);
                 let scope = non_empty(scope_str);
 
+                validate_entry(
+                    &path,
+                    auth_mode,
+                    workspace_role.as_deref(),
+                    global_role.as_deref(),
+                    scope.as_deref(),
+                )?;
+
                 entries.insert(
                     path,
                     DescriptorAuthEntry {
@@ -136,6 +150,43 @@ impl DescriptorAuthTable {
 
         Ok(Self { entries })
     }
+}
+
+fn validate_entry(
+    path: &str,
+    auth_mode: AuthMode,
+    workspace_role: Option<&str>,
+    global_role: Option<&str>,
+    scope: Option<&str>,
+) -> Result<(), String> {
+    if workspace_role.is_some() && global_role.is_some() {
+        return Err(format!(
+            "method {path}: workspace_role and global_role are mutually exclusive"
+        ));
+    }
+
+    if !matches!(auth_mode, AuthMode::Bearer | AuthMode::Dual) {
+        return Ok(());
+    }
+
+    let role_missing = workspace_role.is_none() && global_role.is_none();
+    if role_missing && scope.is_none() {
+        if AUTH_ONLY_METHODS.contains(&path) {
+            return Ok(());
+        }
+        return Err(format!(
+            "method {path}: bearer method declares no role and no scope"
+        ));
+    }
+
+    if role_missing {
+        return Err(format!("method {path}: bearer method declares no role"));
+    }
+    if scope.is_none() {
+        return Err(format!("method {path}: bearer method declares no scope"));
+    }
+
+    Ok(())
 }
 
 fn string_field(msg: &prost_reflect::DynamicMessage, name: &str) -> String {
@@ -165,6 +216,8 @@ pub fn all_paths() -> impl Iterator<Item = &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FUTURE_RPC: &str = "/openshell.v1.OpenShell/FutureRpc";
 
     #[test]
     fn every_proto_rpc_has_authorization_option() {
@@ -204,5 +257,47 @@ mod tests {
             );
             seen.push(path);
         }
+    }
+
+    #[test]
+    fn authentication_only_rpc_must_be_explicitly_allowlisted() {
+        assert!(validate_entry(AUTH_ONLY_METHODS[0], AuthMode::Bearer, None, None, None).is_ok());
+
+        let err = validate_entry(FUTURE_RPC, AuthMode::Bearer, None, None, None)
+            .expect_err("unlisted authentication-only RPC must be rejected");
+        assert_eq!(
+            err,
+            "method /openshell.v1.OpenShell/FutureRpc: bearer method declares no role and no scope"
+        );
+    }
+
+    #[test]
+    fn bearer_rpc_requires_both_role_and_scope() {
+        let missing_role = validate_entry(
+            FUTURE_RPC,
+            AuthMode::Bearer,
+            None,
+            None,
+            Some("sandbox:read"),
+        )
+        .expect_err("missing role must be rejected");
+        assert!(missing_role.ends_with("bearer method declares no role"));
+
+        let missing_scope = validate_entry(FUTURE_RPC, AuthMode::Bearer, Some("user"), None, None)
+            .expect_err("missing scope must be rejected");
+        assert!(missing_scope.ends_with("bearer method declares no scope"));
+    }
+
+    #[test]
+    fn workspace_and_global_roles_are_mutually_exclusive() {
+        let err = validate_entry(
+            FUTURE_RPC,
+            AuthMode::Bearer,
+            Some("admin"),
+            Some("platform_admin"),
+            Some("sandbox:write"),
+        )
+        .expect_err("multiple authorization layers must be rejected");
+        assert!(err.ends_with("workspace_role and global_role are mutually exclusive"));
     }
 }

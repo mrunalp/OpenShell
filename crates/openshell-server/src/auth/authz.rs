@@ -510,13 +510,13 @@ mod tests {
 
     #[test]
     fn no_openshell_scopes_denied() {
-        let id = identity_with_roles_and_scopes(&[], &[]);
+        let id = identity_with_roles_and_scopes(&["openshell-user"], &[]);
         let policy = scoped_policy();
-        assert!(
-            policy
-                .check(&id, "/openshell.v1.OpenShell/ListSandboxes")
-                .is_err()
-        );
+        let err = policy
+            .check(&id, "/openshell.v1.OpenShell/ListSandboxes")
+            .expect_err("identity without required scope must be denied");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(err.message().contains("sandbox:read"));
     }
 
     #[test]
