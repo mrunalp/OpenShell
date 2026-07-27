@@ -328,8 +328,10 @@ Within a workspace, access varies by resource type:
 - **Provider profiles.** Provider profiles are type definitions that describe
   what a provider type needs (credentials, endpoints, filesystem paths).
   Profiles have two-tier scoping: platform-scoped profiles are managed by
-  Platform Admins and visible to all workspaces; workspace-scoped profiles
-  are managed by Workspace Admins and visible only within their workspace.
+  Platform Admins and appear to workspace members through the merged
+  workspace-scoped catalog; querying platform scope directly (`--global`)
+  requires Platform Admin. Workspace-scoped profiles are managed by Workspace
+  Admins and visible only within their workspace.
   The same profile ID can exist at both platform and workspace scope — the
   workspace profile shadows the platform profile for workspace-scoped
   operations, with the platform profile as the fallback when no workspace
@@ -1171,8 +1173,13 @@ foundations. The work can be phased to deliver value incrementally:
   guards, add the authentication-only `GetCurrentUser` identity RPC, and add
   Workspace Admin role with per-workspace management capabilities. Complete
   the `WorkspaceScoped` type-state flow so the annotation supplies the minimum
-  role and the authorized workspace supplies the store key. Replace and remove
-  the `#[rpc_authz]` proc macro and its metadata tables.
+  role and the authorized workspace supplies the store key. Replace
+  `#[rpc_authz]` uses and per-service metadata tables with descriptor metadata;
+  remove the now-unused macro crate in follow-up cleanup. Because OpenShell
+  is pre-stable, Phase 2 deliberately does not backfill workspace membership
+  records or add a permissive grace mode. Platform Admins grant memberships
+  explicitly; `openshell whoami` and authorization denial hints expose the
+  validated subject needed to do so.
 
 - **Phase 3: Kubernetes driver — managed mode (default).** The driver creates
   Kubernetes namespaces on demand using the naming convention
