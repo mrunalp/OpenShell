@@ -26,6 +26,7 @@ use openshell_core::proto::open_shell_client::OpenShellClient;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
+use tonic::Code;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
 use app::{App, Focus, GatewayEntry, LogLine, Screen};
@@ -1694,7 +1695,7 @@ fn spawn_create_provider(app: &App, tx: mpsc::UnboundedSender<Event>) {
                     let _ = tx.send(Event::ProviderCreateResult(Ok(final_name)));
                     return;
                 }
-                Err(status) if status.code() == tonic::Code::AlreadyExists => {
+                Err(status) if status.code() == Code::AlreadyExists => {
                     // Retry with a different name.
                 }
                 Err(e) => {
@@ -2058,9 +2059,9 @@ async fn refresh_providers(app: &mut App) {
         },
         all_workspaces: app.all_workspaces,
     };
-    let providers =
+    let response =
         match tokio::time::timeout(Duration::from_secs(5), app.client.list_providers(req)).await {
-            Ok(Ok(resp)) => resp.into_inner().providers,
+            Ok(Ok(resp)) => resp.into_inner(),
             Ok(Err(e)) => {
                 app.status_text = format!("failed to list providers: {}", e.message());
                 return;
@@ -2070,6 +2071,8 @@ async fn refresh_providers(app: &mut App) {
                 return;
             }
         };
+    app.providers_v2_enabled = response.providers_v2_enabled;
+    let providers = response.providers;
 
     let profiles: ProviderProfileCache = if app.providers_v2_enabled {
         let workspaces: std::collections::HashSet<String> = providers
@@ -2140,23 +2143,32 @@ async fn refresh_providers(app: &mut App) {
 }
 
 async fn refresh_global_settings(app: &mut App) {
-    let req = openshell_core::proto::GetGatewayConfigRequest {};
-    let result =
-        tokio::time::timeout(Duration::from_secs(5), app.client.get_gateway_config(req)).await;
-    match result {
-        Ok(Err(e)) => {
-            app.status_text = format!("failed to fetch global settings: {}", e.message());
-        }
-        Err(_) => {
-            app.status_text = "get gateway settings timed out".to_string();
-        }
-        Ok(Ok(resp)) => {
-            let inner = resp.into_inner();
-            app.apply_global_settings(inner.settings, inner.settings_revision);
+    if !app.global_settings_access_denied {
+        let req = openshell_core::proto::GetGatewayConfigRequest {};
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), app.client.get_gateway_config(req)).await;
+        match result {
+            Ok(Err(status)) if status.code() == Code::PermissionDenied => {
+                app.deny_global_settings_access();
+            }
+            Ok(Err(status)) => {
+                app.status_text = format!("failed to fetch global settings: {}", status.message());
+            }
+            Err(_) => {
+                app.status_text = "get gateway settings timed out".to_string();
+            }
+            Ok(Ok(resp)) => {
+                let inner = resp.into_inner();
+                app.apply_global_settings(inner.settings, inner.settings_revision);
+            }
         }
     }
 
-    // Check for active global policy.
+    if app.global_policy_access_denied {
+        return;
+    }
+
+    // Check for an active global policy only while the caller can read it.
     let policy_req = openshell_core::proto::ListSandboxPoliciesRequest {
         name: String::new(),
         limit: 1,
@@ -2164,21 +2176,32 @@ async fn refresh_global_settings(app: &mut App) {
         global: true,
         workspace: String::new(),
     };
-    if let Ok(Ok(resp)) = tokio::time::timeout(
+    match tokio::time::timeout(
         Duration::from_secs(5),
         app.client.list_sandbox_policies(policy_req),
     )
     .await
     {
-        let revisions = resp.into_inner().revisions;
-        if let Some(latest) = revisions.first() {
-            let status =
-                openshell_core::proto::PolicyStatus::try_from(latest.status).unwrap_or_default();
-            app.global_policy_active = status == openshell_core::proto::PolicyStatus::Loaded;
-            app.global_policy_version = latest.version;
-        } else {
-            app.global_policy_active = false;
-            app.global_policy_version = 0;
+        Ok(Err(status)) if status.code() == Code::PermissionDenied => {
+            app.deny_global_policy_access();
+        }
+        Ok(Err(status)) => {
+            app.status_text = format!("failed to fetch global policy: {}", status.message());
+        }
+        Err(_) => {
+            app.status_text = "list global policies timed out".to_string();
+        }
+        Ok(Ok(resp)) => {
+            let revisions = resp.into_inner().revisions;
+            if let Some(latest) = revisions.first() {
+                let status = openshell_core::proto::PolicyStatus::try_from(latest.status)
+                    .unwrap_or_default();
+                app.global_policy_active = status == openshell_core::proto::PolicyStatus::Loaded;
+                app.global_policy_version = latest.version;
+            } else {
+                app.global_policy_active = false;
+                app.global_policy_version = 0;
+            }
         }
     }
 }
