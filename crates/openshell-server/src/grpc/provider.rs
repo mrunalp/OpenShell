@@ -1468,7 +1468,16 @@ pub(super) async fn handle_list_providers(
         list_provider_records(state.store.as_ref(), &workspace, limit, request.offset).await?
     };
 
-    Ok(Response::new(ListProvidersResponse { providers }))
+    let global_settings = super::policy::load_global_settings(state.store.as_ref()).await?;
+    let providers_v2_enabled = super::policy::bool_setting_enabled(
+        &global_settings,
+        openshell_core::settings::PROVIDERS_V2_ENABLED_KEY,
+    )?;
+
+    Ok(Response::new(ListProvidersResponse {
+        providers,
+        providers_v2_enabled,
+    }))
 }
 
 /// Return provider profiles visible in the given workspace scope.
@@ -8842,6 +8851,41 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn list_providers_reports_provider_mode_to_workspace_members() {
+        use crate::grpc::policy::set_global_bool_setting_for_test;
+
+        let state = test_server_state().await;
+        let request = || {
+            authed_request(ListProvidersRequest {
+                limit: 1,
+                offset: 0,
+                workspace: "default".to_string(),
+                all_workspaces: false,
+            })
+        };
+
+        let disabled = handle_list_providers(&state, request())
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!disabled.providers_v2_enabled);
+
+        set_global_bool_setting_for_test(
+            state.store.as_ref(),
+            openshell_core::settings::PROVIDERS_V2_ENABLED_KEY,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let enabled = handle_list_providers(&state, request())
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(enabled.providers_v2_enabled);
     }
 
     #[tokio::test]

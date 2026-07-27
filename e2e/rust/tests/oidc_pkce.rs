@@ -184,6 +184,28 @@ async fn user_cannot_inspect_gateway() {
 }
 
 #[tokio::test]
+async fn user_gets_actionable_denial_for_gateway_settings() {
+    let session = login_identity(USER).await;
+    let output = run_session_cli(&session, &["settings", "get", "--global"]).await;
+    let denied = combined_output(&output);
+    let normalized_denial = denied
+        .replace('│', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        !output.status.success(),
+        "user read gateway settings:\n{denied}"
+    );
+    assert!(
+        normalized_denial.contains(
+            "gateway settings require the platform admin role; run `openshell whoami` to see your roles"
+        ),
+        "gateway-settings denial should explain the required role and remediation:\n{denied}"
+    );
+}
+
+#[tokio::test]
 async fn admin_can_list_providers() {
     let session = login_identity(ADMIN).await;
     assert_allowed(
@@ -495,6 +517,45 @@ async fn workspace_admin_can_create_provider() {
         WORKSPACE,
         &["provider", "delete", PROVIDER],
         "clean up the provider created by a workspace admin",
+    )
+    .await;
+    delete_workspace(&admin, WORKSPACE).await;
+}
+
+#[tokio::test]
+async fn workspace_admin_can_create_provider_from_existing() {
+    const WORKSPACE: &str = "oidc-wsa-existing";
+    const PROVIDER: &str = "oidc-wsa-existing-provider";
+    let user = login_identity(USER).await;
+    let admin = login_identity(ADMIN).await;
+    prepare_workspace(&admin, &user, WORKSPACE, "admin").await;
+
+    let created = run_workspace_cli_with_env(
+        &user,
+        WORKSPACE,
+        &[
+            "provider",
+            "create",
+            "--name",
+            PROVIDER,
+            "--type",
+            "openai",
+            "--from-existing",
+        ],
+        &[("OPENAI_API_KEY", "e2e-workspace-admin-openai-key")],
+    )
+    .await;
+    assert!(
+        created.status.success(),
+        "workspace admin could not create a provider from existing credentials:\n{}",
+        combined_output(&created)
+    );
+
+    assert_workspace_allowed(
+        &admin,
+        WORKSPACE,
+        &["provider", "delete", PROVIDER],
+        "clean up the provider created from existing credentials",
     )
     .await;
     delete_workspace(&admin, WORKSPACE).await;
@@ -1442,6 +1503,23 @@ async fn run_workspace_cli(session: &LoginSession, workspace: &str, args: &[&str
     run_cli(session.config_home.path(), &command_args).await
 }
 
+async fn run_workspace_cli_with_env(
+    session: &LoginSession,
+    workspace: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Output {
+    let mut command_args = Vec::with_capacity(args.len() + 4);
+    command_args.extend([
+        "--gateway",
+        session.identity.gateway_name,
+        "--workspace",
+        workspace,
+    ]);
+    command_args.extend_from_slice(args);
+    run_cli_with_env(session.config_home.path(), &command_args, env).await
+}
+
 fn assert_admin_role_denial(output: &Output, action: &str) {
     let denied = combined_output(output);
     let compact_denial: String = denied
@@ -1503,7 +1581,12 @@ fn assert_non_member_denial(output: &Output, action: &str) {
 }
 
 async fn run_cli(config_home: &Path, args: &[&str]) -> Output {
-    openshell_cmd()
+    run_cli_with_env(config_home, args, &[]).await
+}
+
+async fn run_cli_with_env(config_home: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut command = openshell_cmd();
+    command
         .arg("--gateway-insecure")
         .args(args)
         .env("XDG_CONFIG_HOME", config_home)
@@ -1514,7 +1597,11 @@ async fn run_cli(config_home: &Path, args: &[&str]) -> Output {
         .env_remove("OPENSHELL_OIDC_CLIENT_SECRET")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command
         .output()
         .await
         .expect("run openshell authorization action")

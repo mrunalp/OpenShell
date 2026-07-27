@@ -2088,7 +2088,7 @@ pub async fn sandbox_create(
     let inferred_provider = inferred_provider_type(command);
     let providers_v2_enabled =
         if inferred_provider.is_some() && auto_providers_override != Some(false) {
-            gateway_providers_v2_enabled(&mut client).await?
+            gateway_providers_v2_enabled(&mut client, workspace).await?
         } else {
             false
         };
@@ -4894,23 +4894,21 @@ fn service_url_for_gateway(service_url: &str, gateway_endpoint: &str) -> String 
     service_url.to_string()
 }
 
-async fn gateway_providers_v2_enabled(client: &mut crate::tls::GrpcClient) -> Result<bool> {
+async fn gateway_providers_v2_enabled(
+    client: &mut crate::tls::GrpcClient,
+    workspace: &str,
+) -> Result<bool> {
     let response = client
-        .get_gateway_config(GetGatewayConfigRequest {})
+        .list_providers(ListProvidersRequest {
+            limit: 1,
+            offset: 0,
+            workspace: workspace.to_string(),
+            all_workspaces: false,
+        })
         .await
         .into_diagnostic()?
         .into_inner();
-    let Some(setting) = response.settings.get(settings::PROVIDERS_V2_ENABLED_KEY) else {
-        return Ok(false);
-    };
-    match setting.value.as_ref() {
-        Some(setting_value::Value::BoolValue(enabled)) => Ok(*enabled),
-        None => Ok(false),
-        Some(_) => Err(miette::miette!(
-            "gateway setting '{}' has invalid value type; expected bool",
-            settings::PROVIDERS_V2_ENABLED_KEY
-        )),
-    }
+    Ok(response.providers_v2_enabled)
 }
 
 async fn fetch_provider_profile(
@@ -4945,7 +4943,7 @@ async fn discover_existing_provider_data(
     provider_type: &str,
     workspace: &str,
 ) -> Result<Option<openshell_providers::DiscoveredProvider>> {
-    if gateway_providers_v2_enabled(client).await? {
+    if gateway_providers_v2_enabled(client, workspace).await? {
         let profile = fetch_provider_profile(client, provider_type, workspace).await?;
         let profile = ProviderTypeProfile::from_proto(&profile);
         let mut discovered =
@@ -7474,7 +7472,12 @@ pub async fn gateway_settings_get(server: &str, json: bool, tls: &TlsOptions) ->
     let response = client
         .get_gateway_config(GetGatewayConfigRequest {})
         .await
-        .into_diagnostic()?
+        .map_err(|status| match status.code() {
+            Code::PermissionDenied => miette!(
+                "gateway settings require the platform admin role; run `openshell whoami` to see your roles"
+            ),
+            _ => miette!("get_gateway_config failed: {status}"),
+        })?
         .into_inner();
 
     if json {

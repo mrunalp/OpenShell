@@ -426,7 +426,18 @@ impl OpenShell for TestOpenShell {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        Ok(Response::new(ListProvidersResponse { providers }))
+        let providers_v2_enabled = self
+            .state
+            .global_settings
+            .lock()
+            .await
+            .get(openshell_core::settings::PROVIDERS_V2_ENABLED_KEY)
+            .and_then(|value| value.value.as_ref())
+            .is_some_and(|value| matches!(value, setting_value::Value::BoolValue(true)));
+        Ok(Response::new(ListProvidersResponse {
+            providers,
+            providers_v2_enabled,
+        }))
     }
 
     async fn list_provider_profiles(

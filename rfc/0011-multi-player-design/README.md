@@ -317,7 +317,9 @@ Within a workspace, access varies by resource type:
 - **Providers.** Users can list and reference providers by name within their
   workspace but cannot create, update, or delete them, and cannot see raw
   credential material. Workspace Admins manage provider lifecycle within their
-  workspace. `ListProviders` is scoped to the caller's workspace.
+  workspace. `ListProviders` is scoped to the caller's workspace and reports
+  the effective provider feature mode needed by workspace clients. Reading or
+  changing the gateway settings map remains a Platform Admin operation.
 
 - **Services.** Services are child resources of sandboxes, keyed by sandbox
   name. They carry the parent sandbox's workspace in their `ObjectMeta` for

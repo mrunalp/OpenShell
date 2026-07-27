@@ -371,6 +371,11 @@ interleave a profile mutation with a sandbox provider-set mutation that would
 leave an ambiguous final dynamic-token state or a deleted custom profile that is
 still referenced by a sandbox.
 
+`ListProvidersResponse` includes the effective `providers_v2_enabled` mode so
+workspace clients can select the matching provider discovery and presentation
+flow. This exposes only the non-sensitive mode bit; reading or changing the
+gateway settings map remains a Platform Admin operation.
+
 Policy and runtime settings are delivered together through the effective sandbox
 config path. A gateway-global policy can override sandbox-scoped policy. The
 sandbox supervisor polls for config revisions and hot-reloads dynamic policy

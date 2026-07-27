@@ -1370,6 +1370,10 @@ message ProviderResponse {
 // List providers response.
 message ListProvidersResponse {
   repeated openshell.datamodel.v1.Provider providers = 1;
+  // Whether profile-backed provider behavior is enabled on this gateway.
+  // Clients use this workspace-readable capability to select the provider UI
+  // and discovery flow without reading platform-admin-only gateway settings.
+  bool providers_v2_enabled = 2;
 }
 
 // List provider type profiles request.

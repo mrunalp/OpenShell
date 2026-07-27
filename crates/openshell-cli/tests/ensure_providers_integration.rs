@@ -270,7 +270,10 @@ impl OpenShell for TestOpenShell {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        Ok(Response::new(ListProvidersResponse { providers }))
+        Ok(Response::new(ListProvidersResponse {
+            providers,
+            providers_v2_enabled: false,
+        }))
     }
 
     async fn list_provider_profiles(

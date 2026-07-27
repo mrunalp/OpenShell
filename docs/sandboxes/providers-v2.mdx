@@ -407,6 +407,11 @@ fails instead of falling back to the legacy provider registry. When
 `providers_v2_enabled=false`, `--from-existing` uses the legacy provider
 registry and ignores profile `discovery` metadata.
 
+The gateway reports the active provider mode through the workspace-readable
+provider API. Workspace members can therefore use the matching provider flow
+without permission to read gateway-global settings. Reading or changing the
+setting itself still requires Platform Admin access.
+
 For example, with Providers v2 enabled, `--type openai --from-existing`
 requires an imported `openai` profile with a `discovery` section. Setting
 `OPENAI_API_KEY` alone is not enough for v2 profile discovery.
