@@ -158,6 +158,86 @@ unverified local token payload. Use the `subject` value when adding the user to
 a workspace. For membership commands, refer to
 [Manage Workspaces and Access](/sandboxes/manage-workspaces).
 
+### Multiple Gateways with One Identity Provider
+
+One identity provider can serve several gateways. Give each gateway its own audience and its own roles claim path so that an admin on one gateway is not an admin on the others.
+
+The gateway derives admin from two settings, and both must be gateway-specific:
+
+- `audience` gates authentication. The gateway rejects any token whose `aud` claim does not contain this value.
+- `roles_claim` and `admin_role` gate authorization. Admin means the configured role name appears in the array at the configured claim path.
+
+A shared audience and a shared realm role make every admin an admin everywhere, so scope both to the gateway.
+
+#### Keycloak: one client per gateway
+
+Create one client per gateway in a single realm, and define `openshell-admin` and `openshell-user` as *client* roles on each client rather than realm roles. Grant users the client role only on the gateways they administer.
+
+Each client needs three things:
+
+- An audience mapper (`oidc-audience-mapper`) with the client's own ID as the included audience, so `aud` identifies the gateway.
+- A client-roles mapper (`oidc-usermodel-client-role-mapper`) emitting `resource_access.${client_id}.roles`, so the gateway can find the roles. Keycloak's built-in `roles` client scope maps realm roles only.
+- `fullScopeAllowed` set to `false`. This is not the Keycloak default and it is required. See the warning below.
+
+Create the client with `kcadm.sh`:
+
+```shell
+kcadm.sh create clients -r openshell -s clientId=openshell-gw-prod-a \
+  -s publicClient=true -s standardFlowEnabled=true \
+  -s 'attributes."pkce.code.challenge.method"=S256' \
+  -s 'redirectUris=["http://127.0.0.1:*","http://localhost:*"]' \
+  -s fullScopeAllowed=false
+
+kcadm.sh create clients/$ID/protocol-mappers/models -r openshell \
+  -s name=aud -s protocol=openid-connect -s protocolMapper=oidc-audience-mapper \
+  -s 'config."included.client.audience"=openshell-gw-prod-a' \
+  -s 'config."access.token.claim"=true'
+
+kcadm.sh create clients/$ID/roles -r openshell -s name=openshell-admin
+kcadm.sh create clients/$ID/roles -r openshell -s name=openshell-user
+```
+
+Configure the gateway against that client:
+
+```toml
+[openshell.oidc]
+issuer      = "https://idp.example.com/realms/openshell"
+audience    = "openshell-gw-prod-a"
+roles_claim = "resource_access.openshell-gw-prod-a.roles"
+admin_role  = "openshell-admin"
+user_role   = "openshell-user"
+```
+
+Register the gateway with the matching client ID:
+
+```shell
+openshell gateway add https://prod-a.example.com --name prod-a \
+  --oidc-issuer https://idp.example.com/realms/openshell \
+  --oidc-client-id openshell-gw-prod-a \
+  --oidc-audience openshell-gw-prod-a
+```
+
+The CLI stores a separate token bundle per gateway, so per-gateway clients need no extra client configuration.
+
+<Warning>
+Set `fullScopeAllowed=false` on every gateway client. Keycloak defaults it to `true`, which places every role the user holds into the token regardless of which client requested it. Combined with the `oidc-audience-resolve-mapper` in Keycloak's built-in `roles` client scope, a token minted for any client in the realm then carries both the other gateways' client IDs in `aud` and their admin roles in `resource_access`. Any gateway in the realm accepts that token and treats the caller as a platform admin. Full scope off confines both `aud` and `resource_access` to the requesting client.
+</Warning>
+
+Verify the boundary by running `openshell whoami` against each gateway. A user who administers only `prod-a` reports `openshell-admin` there and no roles on the others.
+
+#### Alternative: one realm per gateway
+
+A realm per gateway also gives each gateway a distinct `issuer`, so a token from one realm is structurally unusable at another and the isolation does not depend on scope mappings being correct. The cost is a separate user set per realm; share identities through a common user federation source or by brokering each realm to a shared upstream realm. Prefer this when the gateways are separate trust domains, such as different tenants.
+
+#### Workspace membership is per-gateway
+
+Roles are not the only boundary. Workspace membership lives in each gateway's own store, so a user who authenticates against a second gateway without an admin role there also has no workspace membership and cannot list or create sandboxes until a platform admin on that gateway adds them:
+
+```text
+not a member of workspace 'default'; ask a platform admin to run:
+  openshell workspace member add --workspace 'default' --subject '<sub>' --role user
+```
+
 ### Edge JWT (cloud gateways)
 
 For gateways behind a reverse proxy that handles authentication (e.g. Cloudflare Access), the CLI uses a browser-based login flow and routes traffic through a WebSocket tunnel.

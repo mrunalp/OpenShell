@@ -172,6 +172,29 @@
       ]
     },
     {
+      "name": "gateway-roles",
+      "description": "Emits client roles as resource_access.<client_id>.roles. Attach to a per-gateway client when one identity provider serves several gateways and each gateway sets roles_claim to its own client path.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "client roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "claim.name": "resource_access.${client_id}.roles",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
       "name": "web-origins",
       "description": "OpenID Connect scope for allowed web origins",
       "protocol": "openid-connect",
