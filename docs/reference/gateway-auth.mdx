@@ -227,7 +227,35 @@ Verify the boundary by running `openshell whoami` against each gateway. A user w
 
 #### Alternative: one realm per gateway
 
-A realm per gateway also gives each gateway a distinct `issuer`, so a token from one realm is structurally unusable at another and the isolation does not depend on scope mappings being correct. The cost is a separate user set per realm; share identities through a common user federation source or by brokering each realm to a shared upstream realm. Prefer this when the gateways are separate trust domains, such as different tenants.
+Give each gateway its own realm on the same identity provider. Each realm has its own issuer, signing keys, roles, and users, so no per-client scope tuning is involved. Only `issuer` differs between gateways; the audience and the roles claim keep their defaults and ordinary realm roles work unchanged:
+
+```toml
+[openshell.oidc]
+issuer = "https://idp.example.com/realms/gateway-a"
+# audience, roles_claim, admin_role, and user_role keep their defaults
+```
+
+Register each gateway against its own realm:
+
+```shell
+openshell gateway add https://prod-a.example.com --name prod-a \
+  --oidc-issuer https://idp.example.com/realms/gateway-a \
+  --oidc-client-id openshell-cli
+```
+
+Because realms do not share signing keys, a token from one realm fails at signature verification rather than at a claim comparison:
+
+```text
+invalid token: unknown signing key
+```
+
+The gateway rejects it before reading the issuer, audience, or roles, so no client-scope mistake can widen the boundary.
+
+To avoid a separate credential per realm, broker each gateway realm to a shared upstream realm that holds the users, or point every realm at a common user federation source. Users then authenticate once against the upstream, and three properties still hold:
+
+- The gateway receives a token issued by the *gateway* realm, not the upstream realm.
+- Roles come from the gateway realm. Grant `openshell-admin` there, so admin stays per-gateway even though the credential is shared.
+- The `sub` claim identifies the realm-local account, not the upstream user. Workspace membership is therefore per-gateway, and the same person has a different subject on each gateway.
 
 #### Workspace membership is per-gateway
 
@@ -237,6 +265,18 @@ Roles are not the only boundary. Workspace membership lives in each gateway's ow
 not a member of workspace 'default'; ask a platform admin to run:
   openshell workspace member add --workspace 'default' --subject '<sub>' --role user
 ```
+
+This holds under both topologies. Use the `subject` that `openshell whoami` reports against that specific gateway, because the subject is scoped to the realm that issued the token.
+
+#### Choosing between the two
+
+| | One client per gateway | One realm per gateway |
+|---|---|---|
+| Isolation rests on | Audience plus correct scope mappings | Separate issuers and signing keys |
+| Gateway settings that differ | `audience` and `roles_claim` | `issuer` only |
+| Roles | Client roles on each gateway's client | Realm roles in each gateway's realm |
+| Identity | One account, roles per gateway client | One account per realm, or brokered from a shared realm |
+| Best for | One organization with different admin teams | Separate trust domains, such as different tenants |
 
 ### Edge JWT (cloud gateways)
 
