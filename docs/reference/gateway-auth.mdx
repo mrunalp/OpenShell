@@ -160,14 +160,41 @@ a workspace. For membership commands, refer to
 
 ### Multiple Gateways with One Identity Provider
 
-One identity provider can serve several gateways. Give each gateway its own audience and its own roles claim path so that an admin on one gateway is not an admin on the others.
+One identity provider can serve several gateways. Left at its defaults, every gateway shares the `openshell-cli` audience and the realm roles `openshell-admin` and `openshell-user`, so any user who reaches a gateway URL is authorized on it and a platform admin is an admin everywhere.
 
-The gateway derives admin from two settings, and both must be gateway-specific:
+Three settings can carry a per-gateway boundary, and each gives a different topology:
 
-- `audience` gates authentication. The gateway rejects any token whose `aud` claim does not contain this value.
-- `roles_claim` and `admin_role` gate authorization. Admin means the configured role name appears in the array at the configured claim path.
+| Topology | Boundary | Per-gateway settings |
+|---|---|---|
+| Per-gateway roles | Role names, in one shared realm and client | `admin_role`, `user_role` |
+| Per-gateway client | Audience and client roles | `audience`, `roles_claim` |
+| Per-gateway realm | Issuer and signing keys | `issuer` |
 
-A shared audience and a shared realm role make every admin an admin everywhere, so scope both to the gateway.
+Only the per-gateway client and per-gateway realm topologies confine a token to a single gateway. Under per-gateway roles, one token is valid at every gateway the user can reach, so a gateway that receives it can replay it against the others. Choose accordingly when gateways do not trust each other.
+
+#### Per-gateway roles in one realm
+
+The simplest option, and the only one that adds no clients or realms. Define two realm roles per gateway and point each gateway at its own pair:
+
+```toml
+[openshell.oidc]
+issuer      = "https://idp.example.com/realms/openshell"
+audience    = "openshell-cli"
+roles_claim = "realm_access.roles"
+admin_role  = "gw-prod-a-admin"
+user_role   = "gw-prod-a-user"
+```
+
+Grant `gw-prod-a-admin` or `gw-prod-a-user` to the users who should reach that gateway. A caller holding neither is denied:
+
+```text
+role 'gw-prod-a-user' required
+```
+
+Users keep one client and one login, and share a gateway by receiving one more role. Two limits apply:
+
+- `GetCurrentUser` and `GetGatewayConfig` deliberately require no role. Any authenticated user in the realm can call them on any gateway, whatever their gateway roles.
+- The roles claim carries every role the user holds, and the token travels in a gRPC header capped at 16 KB. At roughly 22 bytes per role, a user can hold roles for a few hundred gateways before requests fail with `header list size to send violates the maximum size (16384 bytes)`. Plan for a few hundred gateways per user at most, and do not grant fleet-wide operators every gateway role.
 
 #### Keycloak: one client per gateway
 
@@ -219,6 +246,8 @@ openshell gateway add https://prod-a.example.com --name prod-a \
 
 The CLI stores a separate token bundle per gateway, so per-gateway clients need no extra client configuration.
 
+Create the clients through the Admin REST API as each gateway is provisioned. A single realm import holding thousands of clients runs as one transaction and does not complete, while incremental creation handles the same volume in seconds. Client count itself is not a constraint: a realm with thousands of clients issues tokens at the same rate as a realm with one. Raise the `realms` Infinispan cache above its 10,000-entry default only if the database is remote enough that reloading client records becomes visible.
+
 <Warning>
 Set `fullScopeAllowed=false` on every gateway client. Keycloak defaults it to `true`, which places every role the user holds into the token regardless of which client requested it. Combined with the `oidc-audience-resolve-mapper` in Keycloak's built-in `roles` client scope, a token minted for any client in the realm then carries both the other gateways' client IDs in `aud` and their admin roles in `resource_access`. Any gateway in the realm accepts that token and treats the caller as a platform admin. Full scope off confines both `aud` and `resource_access` to the requesting client.
 </Warning>
@@ -226,6 +255,10 @@ Set `fullScopeAllowed=false` on every gateway client. Keycloak defaults it to `t
 Verify the boundary by running `openshell whoami` against each gateway. A user who administers only `prod-a` reports `openshell-admin` there and no roles on the others.
 
 #### Alternative: one realm per gateway
+
+<Warning>
+Realm count is the most expensive thing to scale in Keycloak. Administrative and startup cost grows sharply with the number of realms, well before client or role count becomes a factor, and large fleets require growing the realm cache alongside them. Use this topology for a handful of separate trust domains. Do not use it for one realm per user, per sandbox, or per VM — reach for per-gateway roles or per-gateway clients instead.
+</Warning>
 
 Give each gateway its own realm on the same identity provider. Each realm has its own issuer, signing keys, roles, and users, so no per-client scope tuning is involved. Only `issuer` differs between gateways; the audience and the roles claim keep their defaults and ordinary realm roles work unchanged:
 
@@ -266,17 +299,21 @@ not a member of workspace 'default'; ask a platform admin to run:
   openshell workspace member add --workspace 'default' --subject '<sub>' --role user
 ```
 
-This holds under both topologies. Use the `subject` that `openshell whoami` reports against that specific gateway, because the subject is scoped to the realm that issued the token.
+This holds under all three topologies. Use the `subject` that `openshell whoami` reports against that specific gateway, because the subject is scoped to the realm that issued the token.
 
-#### Choosing between the two
+#### Choosing a topology
 
-| | One client per gateway | One realm per gateway |
-|---|---|---|
-| Isolation rests on | Audience plus correct scope mappings | Separate issuers and signing keys |
-| Gateway settings that differ | `audience` and `roles_claim` | `issuer` only |
-| Roles | Client roles on each gateway's client | Realm roles in each gateway's realm |
-| Identity | One account, roles per gateway client | One account per realm, or brokered from a shared realm |
-| Best for | One organization with different admin teams | Separate trust domains, such as different tenants |
+| | Per-gateway roles | Per-gateway client | Per-gateway realm |
+|---|---|---|---|
+| Isolation rests on | Role names | Audience plus correct scope mappings | Separate issuers and signing keys |
+| Gateway settings that differ | `admin_role`, `user_role` | `audience`, `roles_claim` | `issuer` |
+| Keycloak objects per gateway | 2 realm roles | 1 client, 2 client roles, 1 mapper | 1 realm |
+| Confines a token to one gateway | No | Yes | Yes |
+| Covers the role-exempt RPCs | No | Yes | Yes |
+| Per-user ceiling | A few hundred gateways | None | None |
+| Scales to thousands of gateways | Yes | Yes | No |
+| Identity | One account, one login | One account, roles per gateway client | One account per realm, or brokered from a shared realm |
+| Best for | Many gateways inside one organization | Gateways that do not trust each other | A few separate trust domains |
 
 ### Edge JWT (cloud gateways)
 
