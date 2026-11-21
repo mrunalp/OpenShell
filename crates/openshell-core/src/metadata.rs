@@ -91,13 +91,6 @@ pub const IDLE_STOPPED_REASON: &str = "IdleStopped";
 /// Ready condition reason of a sandbox whose idle stop is still in flight.
 pub const IDLE_STOPPING_REASON: &str = "IdleStopping";
 
-/// Condition type for the program status workload terminals declare via OSC 7501.
-///
-/// Its reason is the state (`Idle`, `Working`, `Done`, `Blocked`, or `Error`),
-/// and its transition time is when the program entered that state. The gateway
-/// attaches it when it serves a sandbox; it is never stored.
-pub const PROGRAM_STATUS_CONDITION: &str = "ProgramStatus";
-
 impl Sandbox {
     /// Whether the gateway stopped this sandbox for idleness, so connecting
     /// may start it again.

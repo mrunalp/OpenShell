@@ -60,6 +60,9 @@ nothing stops a sandbox on its own and no driver implements suspend.
 
   Users can rely on idle stop only when the reporting agent is the sandbox's
   only long-running work, and the docs say so.
+- Showing program status to clients. Phase 1 does not expose the reported
+  state through `GetSandbox`, `WatchSandbox`, or `ListSandboxes`; Open
+  questions records how a later change could.
 - Waking on inbound service traffic. Only an explicit connect or start wakes a
   sandbox in phase 1.
 - Interpreting the free-text `msg` and `title` fields. They are validated and
@@ -182,31 +185,11 @@ transition restarts the state timer and advances a revision, including a
 order, so concurrent terminals never hide a transition from the reporter.
 
 The replica holding the supervisor session keeps that session's latest report
-in memory. Only that live report authorizes an idle stop. The gateway also
-shows it as a `ProgramStatus` condition in the existing
-`SandboxStatus.conditions` list. This keeps the public `Sandbox` messages
-unchanged: SDK users who build exhaustive `SandboxStatus` literals still
-compile, as the `sandbox_status_compatibility` fixture requires.
-
-| Field | Value |
-|-------|-------|
-| `reason` | `Idle`, `Working`, `Done`, `Blocked`, or `Error` |
-| `message` | For example `claude-code is blocked on permission` |
-| `transition_time` | When the program entered the state, in gateway time |
-
-The condition is never stored. `GetSandbox` and each `WatchSandbox` snapshot
-attach it when they read the sandbox, only while the sandbox is `Ready` and the
-report belongs to the running main-process instance. A replica that does not
-hold the session reads it from the owner with the peer RPC
-`PeerGetSandboxProgramStatus`, using the same owner routing as provider status.
-A report that changes the state, blocked kind, or app notifies local watchers.
-The first change notifies at once; quick flips within the next 2 seconds, such
-as `working`, `blocked`, `working`, collapse into one notification at the end
-of that window. Input alone notifies no one, and the supervisor sends input-only reports only
-while the program waits on the user. Reports therefore cost no store writes,
-no resource-version churn for the reconcile sweep, and nothing when idle stop
-is disabled. `ListSandboxes`, and watchers on a replica without the session,
-do not see the condition.
+in memory. Only that live report authorizes an idle stop. Reports write nothing
+to the store and add no public `Sandbox` fields, so SDK users who build
+exhaustive `SandboxStatus` literals still compile, as the
+`sandbox_status_compatibility` fixture requires. The supervisor sends
+input-only reports only while the program waits on the user.
 
 ### Stop idle sandboxes
 
@@ -304,7 +287,7 @@ sequenceDiagram
     S->>A: Support reply
     A->>S: state=done:app=claude-code
     S->>G: SupervisorWorkloadActivity(done, state_age)
-    G->>G: record ProgramStatus condition
+    G->>G: record live report
     Note over G: idle sweep: done for > idle_stop_after_seconds
     G->>S: WorkloadActivityRequest
     S->>G: SupervisorWorkloadActivity(done, request_id)
@@ -354,8 +337,7 @@ report content. `msg` and `title` are validated per the spec, then discarded.
    limits, and record semantics. A prototype harness has run Claude Code
    2.1.327 and Codex 0.170.0 through the scanner on a host PTY.
 2. **Reporting.** Add `SupervisorWorkloadActivity` and the supervisor reporter
-   task. Add the gateway handler, the read-time `ProgramStatus` condition, and
-   the `PeerGetSandboxProgramStatus` peer read.
+   task, and the gateway handler that keeps the live report.
 3. **Policy.** Register the `idle_stop_after_seconds` setting. Add the idle
    sweep and the `IdleStopped` reason, and document them on the sandbox
    lifecycle page.
@@ -395,11 +377,6 @@ sets a gateway value or a user opts in per sandbox.
   The window is at most one round trip, plus 2 seconds, plus the write's
   latency, and only for a sandbox that already waited past its timeout. Closing it fully would need the
   supervisor to hold input during the commit.
-- **Partial visibility.** `ProgramStatus` is not in `ListSandboxes`, and a
-  watcher connected to a replica without the session sees no condition or
-  updates. Fanning reports out to every replica would fix that at the cost of
-  cross-replica traffic per report. A separate status record, listed under
-  Open questions, would too.
 
 ## Alternatives
 
@@ -423,16 +400,17 @@ each agent needs its own configuration inside the sandbox image, and the hook
 runs as workload code with network access. The terminal channel needs nothing
 from the image.
 
-### Store the program status on the sandbox record
+### Show program status in this change
 
-An earlier version wrote `ProgramStatus` to the sandbox record on each state
-change and on input progress of a minute or more. Every reader, on every
-replica, then saw it. But an active agent cost two writes per turn even with
-idle stop disabled, each write bumped the resource version and woke watchers,
-and the writes needed owner fencing, conflict retries, and preservation across
-driver snapshots and phase changes. Reading the live report at serve time
-removes all of that. Storing the status in its own record avoids most of these
-costs and remains open; see Open questions.
+Earlier versions of this change showed the report as a `ProgramStatus`
+condition. Writing it to the sandbox record cost an active agent two writes
+per turn even with idle stop disabled. Each write bumped the resource version
+and woke watchers, and needed owner fencing, conflict retries, and
+preservation across driver snapshots and phase changes. Attaching it at read
+time removed the writes, but `ListSandboxes` and watchers on other replicas
+could not see it, and each of their watch events cost a peer call. Idle stop
+does not depend on the display, so it is left to a later change; see Open
+questions.
 
 ### Do nothing
 
@@ -484,11 +462,10 @@ holding capacity.
 - Should the final check drop the 15-second input report lag? The confirmed
   snapshot has no lag, but the sweep would still need it to avoid needless
   confirmation requests, so the first request is delayed either way.
-- Should `ListSandboxes`, or watchers on a replica without the session, show
-  `ProgramStatus`? Per-report fan-out or a peer read per sandbox would do it.
-  A later change could instead store the status in its own lightweight
-  object, keyed by sandbox ID and written by the session owner on state
-  changes only, like `supervisor_service_installation`, and merge it on read.
+- How should clients see program status? A later change could store it in its
+  own lightweight object, keyed by sandbox ID and written by the session owner
+  on state changes only, like `supervisor_service_installation`, and merge it
+  into `GetSandbox`, `WatchSandbox`, and `ListSandboxes` on read.
   That works across replicas without fan-out, and because it never touches the
   sandbox record it causes no compare-and-swap conflicts with lifecycle writes
   and no resource-version churn. It costs a write per state change, roughly

@@ -1022,9 +1022,6 @@ pub struct ComputeRuntime {
     /// Idle stops waiting for their supervisor to confirm, by request ID. The
     /// reply's arrival time at the report handler is sent to the waiter.
     activity_requests: Arc<StdMutex<HashMap<String, oneshot::Sender<Instant>>>>,
-    /// Sandboxes inside a `ProgramStatus` notify window, and whether the
-    /// status changed again since the window's last notification.
-    status_notify_windows: Arc<StdMutex<HashMap<String, bool>>>,
     sandbox_updates_enabled: bool,
     update_recovery_sweep: Arc<tokio::sync::Semaphore>,
     update_recovery_backoff: Arc<Mutex<HashMap<String, image_update::UpdateRecoveryBackoff>>>,
@@ -1152,7 +1149,6 @@ impl ComputeRuntime {
             activity_gates: Arc::default(),
             idle_stops_in_flight: Arc::default(),
             activity_requests: Arc::default(),
-            status_notify_windows: Arc::default(),
             sandbox_updates_enabled: false,
             update_recovery_sweep: Arc::new(tokio::sync::Semaphore::new(1)),
             update_recovery_backoff: Arc::default(),
@@ -5530,7 +5526,7 @@ impl ComputeRuntime {
             tokio::spawn(async move {
                 let program = runtime
                     .current_live_activity(sandbox.object_id())
-                    .map(|live| live.report.app)
+                    .map(|live| idle_stop::program_name(&live.report))
                     .unwrap_or_default();
                 match runtime.run_idle_stop(&sandbox).await {
                     Ok(Some(_)) => info!(
@@ -5593,7 +5589,7 @@ impl ComputeRuntime {
         arrived: Instant,
     ) -> Result<(), String> {
         let received = SystemTime::now();
-        let (current, changed) = {
+        let current = {
             let gate = self.activity_gate(sandbox_id);
             let _gate = gate.lock().await;
             let mut live = self
@@ -5610,23 +5606,19 @@ impl ComputeRuntime {
                 && !live
                     .get(sandbox_id)
                     .is_some_and(|held| held.is_newer_than(session_id, report));
-            let mut changed = false;
             if accepted {
-                let next = idle_stop::live_from_report(
-                    report,
-                    session_id,
-                    instance_id,
-                    confirms,
-                    received,
+                live.insert(
+                    sandbox_id.to_string(),
+                    idle_stop::live_from_report(
+                        report,
+                        session_id,
+                        instance_id,
+                        confirms,
+                        received,
+                    ),
                 );
-                // Watchers re-read the sandbox only when what they would see
-                // changes: the session, the state, its kind, or the app.
-                changed = live.get(sandbox_id).is_none_or(|held| {
-                    held.session_id != next.session_id || held.shows_differently_from(&next)
-                });
-                live.insert(sandbox_id.to_string(), next);
             }
-            (current, changed)
+            current
         };
         // A reply from a replaced session confirms nothing. An older reply
         // from the current session still answers: the newer report it lost
@@ -5641,74 +5633,7 @@ impl ComputeRuntime {
         {
             let _ = waiter.send(arrived);
         }
-        if changed {
-            self.notify_program_status(sandbox_id);
-        }
         Ok(())
-    }
-
-    /// Tell watchers the displayed `ProgramStatus` changed. The first change
-    /// notifies at once and opens a window; changes inside it collapse into
-    /// one notification at its end, which opens the next window. Quick flips
-    /// such as `Working`, `Blocked`, `Working` cost at most one watch read
-    /// per window, and watchers always read the newest report.
-    fn notify_program_status(&self, sandbox_id: &str) {
-        {
-            let mut windows = self
-                .status_notify_windows
-                .lock()
-                .expect("status notify lock poisoned");
-            if let Some(changed_again) = windows.get_mut(sandbox_id) {
-                *changed_again = true;
-                return;
-            }
-            windows.insert(sandbox_id.to_string(), false);
-        }
-        self.sandbox_watch_bus.notify_existing(sandbox_id);
-        let windows = Arc::clone(&self.status_notify_windows);
-        let bus = self.sandbox_watch_bus.clone();
-        let sandbox_id = sandbox_id.to_string();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(idle_stop::STATUS_NOTIFY_WINDOW).await;
-                let changed_again = {
-                    let mut windows = windows.lock().expect("status notify lock poisoned");
-                    let changed_again = windows.get(&sandbox_id).copied().unwrap_or(false);
-                    if changed_again {
-                        windows.insert(sandbox_id.clone(), false);
-                    } else {
-                        windows.remove(&sandbox_id);
-                    }
-                    changed_again
-                };
-                if !changed_again {
-                    return;
-                }
-                bus.notify_existing(&sandbox_id);
-            }
-        });
-    }
-
-    /// The session registry this runtime checks reports against. Production
-    /// shares it with the gateway; some test states build their own.
-    #[cfg(test)]
-    pub(crate) fn supervisor_sessions_for_test(&self) -> &SupervisorSessionRegistry {
-        &self.supervisor_sessions
-    }
-
-    /// The live `ProgramStatus` condition for `sandbox`, built from its
-    /// current session's report. It is never stored: `GetSandbox` and
-    /// `WatchSandbox` attach it when they read the sandbox.
-    pub(crate) fn program_status_condition(&self, sandbox: &Sandbox) -> Option<SandboxCondition> {
-        let live = self.current_live_activity(sandbox.object_id())?;
-        let status = sandbox.status.as_ref()?;
-        if status.phase != SandboxPhase::Ready as i32
-            || (!status.main_process_instance_id.is_empty()
-                && status.main_process_instance_id != live.instance_id)
-        {
-            return None;
-        }
-        idle_stop::condition_from_live(&live)
     }
 
     async fn restart_sandbox_runtime(&self, sandbox_id: &str) -> Result<(), String> {
@@ -9486,7 +9411,6 @@ pub fn new_test_runtime_with_driver(
         activity_gates: Arc::default(),
         idle_stops_in_flight: Arc::default(),
         activity_requests: Arc::default(),
-        status_notify_windows: Arc::default(),
         sandbox_updates_enabled: false,
         update_recovery_sweep: Arc::new(tokio::sync::Semaphore::new(1)),
         update_recovery_backoff: Arc::default(),
@@ -10790,7 +10714,6 @@ mod tests {
             activity_gates: Arc::default(),
             idle_stops_in_flight: Arc::default(),
             activity_requests: Arc::default(),
-            status_notify_windows: Arc::default(),
             sandbox_updates_enabled: false,
             update_recovery_sweep: Arc::new(Semaphore::new(1)),
             update_recovery_backoff: Arc::default(),
@@ -23032,15 +22955,13 @@ endpoint = { kind = "unix", socket_path = "/run/agent-substrate/isolation.sock" 
     }
 
     #[tokio::test]
-    async fn workload_activity_is_shown_for_the_running_instance_and_never_stored() {
+    async fn workload_activity_is_recorded_in_memory_and_never_stored() {
         use openshell_core::proto::WorkloadProgramState;
-        let driver = ControlledDriver::new();
-        let runtime = test_runtime(driver.clone()).await;
+        let runtime = test_runtime(ControlledDriver::new()).await;
         let sandbox = idle_ready_record("sb-activity", "sandbox-activity");
         runtime.store.put_message(&sandbox).await.unwrap();
         register_test_supervisor_session(&runtime, sandbox.object_id());
         let version = sandbox_resource_version(&stored_sandbox(&runtime, "sb-activity").await);
-        let mut watch = runtime.sandbox_watch_bus.subscribe("sb-activity");
 
         record(
             &runtime,
@@ -23048,118 +22969,13 @@ endpoint = { kind = "unix", socket_path = "/run/agent-substrate/isolation.sock" 
             &program_report(WorkloadProgramState::Done, 0),
         )
         .await;
-        let stored = stored_sandbox(&runtime, "sb-activity").await;
+        let live = runtime.current_live_activity("sb-activity").unwrap();
+        assert_eq!(live.state, WorkloadProgramState::Done);
         assert_eq!(
-            sandbox_resource_version(&stored),
+            sandbox_resource_version(&stored_sandbox(&runtime, "sb-activity").await),
             version,
             "reports never write the store"
         );
-        assert!(stored.status.as_ref().unwrap().conditions.iter().all(
-            |condition| condition.r#type != openshell_core::metadata::PROGRAM_STATUS_CONDITION
-        ));
-        let shown = runtime.program_status_condition(&stored).unwrap();
-        assert_eq!(shown.reason, "Done");
-        assert_eq!(shown.message, "claude-code is done");
-        assert!(watch.try_recv().is_ok(), "a state change wakes watchers");
-
-        // Input alone does not wake watchers.
-        let mut typed = program_report(WorkloadProgramState::Done, 0);
-        typed.input_age = Some(prost_types::Duration::default());
-        record(&runtime, "sb-activity", &typed).await;
-        assert!(watch.try_recv().is_err());
-
-        // Driver snapshots do not hide it.
-        runtime
-            .apply_sandbox_update(ready_driver_sandbox("sb-activity", "sandbox-activity"))
-            .await
-            .unwrap();
-        let observed = stored_sandbox(&runtime, "sb-activity").await;
-        assert_eq!(
-            runtime.program_status_condition(&observed).unwrap().reason,
-            "Done"
-        );
-
-        // A report from another supervisor instance is not shown for this one.
-        runtime
-            .record_workload_activity(
-                "sb-activity",
-                "session-1",
-                "instance-old",
-                true,
-                &program_report(WorkloadProgramState::Working, 0),
-            )
-            .await
-            .unwrap();
-        assert!(runtime.program_status_condition(&observed).is_none());
-
-        // Nor once the sandbox leaves `Ready`.
-        let mut stopping = observed;
-        stopping.set_phase(SandboxPhase::Stopping as i32);
-        record(
-            &runtime,
-            "sb-activity",
-            &program_report(WorkloadProgramState::Done, 0),
-        )
-        .await;
-        assert!(runtime.program_status_condition(&stopping).is_none());
-    }
-
-    #[tokio::test]
-    async fn quick_status_flips_collapse_into_one_notification_per_window() {
-        use openshell_core::proto::WorkloadProgramState;
-        let runtime = test_runtime(ControlledDriver::new()).await;
-        runtime
-            .store
-            .put_message(&idle_ready_record("sb-flips", "sandbox-flips"))
-            .await
-            .unwrap();
-        register_test_supervisor_session(&runtime, "sb-flips");
-        let mut watch = runtime.sandbox_watch_bus.subscribe("sb-flips");
-        let notifications = |watch: &mut tokio::sync::broadcast::Receiver<()>| {
-            std::iter::from_fn(|| watch.try_recv().ok()).count()
-        };
-        tokio::time::pause();
-
-        record(
-            &runtime,
-            "sb-flips",
-            &program_report(WorkloadProgramState::Done, 0),
-        )
-        .await;
-        assert_eq!(
-            notifications(&mut watch),
-            1,
-            "a lone change notifies at once"
-        );
-
-        for state in [
-            WorkloadProgramState::Working,
-            WorkloadProgramState::Blocked,
-            WorkloadProgramState::Working,
-        ] {
-            record(&runtime, "sb-flips", &program_report(state, 0)).await;
-        }
-        assert_eq!(notifications(&mut watch), 0, "flips inside the window wait");
-        tokio::time::sleep(idle_stop::STATUS_NOTIFY_WINDOW).await;
-        tokio::task::yield_now().await;
-        assert_eq!(
-            notifications(&mut watch),
-            1,
-            "the window ends with one notification"
-        );
-
-        // A quiet window closes, and the next change notifies at once again.
-        tokio::time::sleep(idle_stop::STATUS_NOTIFY_WINDOW).await;
-        tokio::task::yield_now().await;
-        assert_eq!(notifications(&mut watch), 0);
-        assert!(runtime.status_notify_windows.lock().unwrap().is_empty());
-        record(
-            &runtime,
-            "sb-flips",
-            &program_report(WorkloadProgramState::Done, 0),
-        )
-        .await;
-        assert_eq!(notifications(&mut watch), 1);
     }
 
     #[tokio::test]
@@ -23258,7 +23074,6 @@ endpoint = { kind = "unix", socket_path = "/run/agent-substrate/isolation.sock" 
             stopped.idle_stopped(),
             "idle stop settles with its own reason"
         );
-        assert!(runtime.program_status_condition(&stopped).is_none());
         assert_eq!(
             driver.stop_calls(),
             1,
@@ -23409,13 +23224,8 @@ endpoint = { kind = "unix", socket_path = "/run/agent-substrate/isolation.sock" 
         let driver = ControlledDriver::new();
         let runtime = Arc::new(test_runtime(driver.clone()).await);
         due_sandbox(&runtime, "sb-restored", "sandbox-restored").await;
-        // A gateway restart keeps no live report, so nothing is shown.
+        // A gateway restart keeps no live report.
         runtime.live_activity.lock().unwrap().clear();
-        assert!(
-            runtime
-                .program_status_condition(&stored_sandbox(&runtime, "sb-restored").await)
-                .is_none()
-        );
         Arc::clone(&runtime).stop_idle_sandboxes().await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(driver.stop_calls(), 0);

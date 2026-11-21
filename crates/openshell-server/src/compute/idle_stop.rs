@@ -7,16 +7,13 @@
 //! The supervisor reports OSC 7501 program status with relative ages. The
 //! replica that holds a sandbox's supervisor session keeps the latest report
 //! of that session in memory, with exact input time, and decides idleness
-//! from it alone. The same report is shown as the `ProgramStatus` condition,
-//! attached when the sandbox is read and never stored. A sandbox with no
-//! report on its current session is never idle.
+//! from it alone. A sandbox with no report on its current session is never
+//! idle.
 
 use std::time::{Duration, SystemTime};
 
-use openshell_core::metadata::PROGRAM_STATUS_CONDITION;
 use openshell_core::proto::{
-    Sandbox, SandboxCondition, SandboxPhase, SupervisorWorkloadActivity, WorkloadBlockedKind,
-    WorkloadProgramState,
+    Sandbox, SandboxCondition, SandboxPhase, SupervisorWorkloadActivity, WorkloadProgramState,
 };
 
 pub use openshell_core::metadata::IDLE_STOPPED_REASON;
@@ -38,9 +35,6 @@ pub const CONFIRM_FRESHNESS: Duration = Duration::from_secs(2);
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_millis(200);
-/// Watchers hear the first `ProgramStatus` change at once; further changes
-/// within this window collapse into one notification at its end.
-pub const STATUS_NOTIFY_WINDOW: Duration = Duration::from_secs(2);
 /// Durable marker that the in-flight stop was started by the idle sweep. It
 /// survives gateway restarts and driver snapshots that rewrite conditions.
 pub const IDLE_STOP_ANNOTATION: &str = "internal.openshell.ai/idle-stop";
@@ -51,6 +45,7 @@ pub const IDLE_STOPPED_MESSAGE: &str = "Sandbox stopped after its program waited
 /// Reported app names are bounded by OSC 7501; bound them again here.
 const MAX_APP: usize = 32;
 
+#[cfg(test)]
 fn timestamp(time: SystemTime) -> Option<prost_types::Timestamp> {
     openshell_core::time::timestamp_from_system_time(time).ok()
 }
@@ -64,36 +59,19 @@ fn before(now: SystemTime, age: Option<&prost_types::Duration>) -> Option<System
     now.checked_sub(age)
 }
 
-fn state_reason(state: WorkloadProgramState) -> Option<&'static str> {
-    Some(match state {
-        WorkloadProgramState::Unspecified => return None,
-        WorkloadProgramState::Idle => "Idle",
-        WorkloadProgramState::Working => "Working",
-        WorkloadProgramState::Done => "Done",
-        WorkloadProgramState::Blocked => "Blocked",
-        WorkloadProgramState::Error => "Error",
-    })
-}
-
-fn condition_message(report: &SupervisorWorkloadActivity, reason: &str) -> String {
+/// The reported app name, reduced to safe characters for logs.
+pub fn program_name(report: &SupervisorWorkloadActivity) -> String {
     let app: String = report
         .app
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || "_.+-".contains(*c))
         .take(MAX_APP)
         .collect();
-    let program = if app.is_empty() {
+    if app.is_empty() {
         "program".to_string()
     } else {
         app
-    };
-    let waits_for = match WorkloadBlockedKind::try_from(report.blocked_kind) {
-        Ok(WorkloadBlockedKind::Permission) => " on permission",
-        Ok(WorkloadBlockedKind::Question) => " on a question",
-        Ok(WorkloadBlockedKind::Auth) => " on authentication",
-        _ => "",
-    };
-    format!("{program} is {}{waits_for}", reason.to_ascii_lowercase())
+    }
 }
 
 /// The latest report of a supervisor session, in gateway time.
@@ -109,21 +87,12 @@ pub struct LiveActivity {
     pub since: SystemTime,
     /// The supervisor's summary sequence; older summaries are dropped.
     pub sequence: u64,
-    /// The report itself and when it arrived, for the display condition.
+    /// The report itself and when it arrived.
     pub report: SupervisorWorkloadActivity,
     pub received: SystemTime,
 }
 
 impl LiveActivity {
-    /// Whether `other` would be displayed differently: another state, kind,
-    /// or app. Input and ages alone do not change the display.
-    #[must_use]
-    pub fn shows_differently_from(&self, other: &Self) -> bool {
-        self.state != other.state
-            || self.report.blocked_kind != other.report.blocked_kind
-            || self.report.app != other.report.app
-    }
-
     /// Whether `report` from `session_id` is older than this one. A new
     /// session always replaces the entry.
     #[must_use]
@@ -154,30 +123,6 @@ pub fn live_from_report(
         report: report.clone(),
         received: now,
     }
-}
-
-/// The `ProgramStatus` condition for a supervisor report received at `now`,
-/// or `None` when no program currently reports. Its time is when the program
-/// entered the state; input does not move it.
-pub fn condition_from_report(
-    report: &SupervisorWorkloadActivity,
-    now: SystemTime,
-) -> Option<SandboxCondition> {
-    let state = WorkloadProgramState::try_from(report.state).ok()?;
-    let reason = state_reason(state)?;
-    let state_since = before(now, report.state_age.as_ref()).unwrap_or(now);
-    Some(SandboxCondition {
-        r#type: PROGRAM_STATUS_CONDITION.to_string(),
-        status: "True".to_string(),
-        reason: reason.to_string(),
-        message: condition_message(report, reason),
-        transition_time: timestamp(state_since),
-    })
-}
-
-/// The `ProgramStatus` condition for a live report.
-pub fn condition_from_live(live: &LiveActivity) -> Option<SandboxCondition> {
-    condition_from_report(&live.report, live.received)
 }
 
 /// The effective idle timeout for a raw setting value, or `None` when idle
@@ -263,6 +208,7 @@ pub fn idle_stop_marked(sandbox: &Sandbox) -> bool {
 mod tests {
     use super::*;
     use openshell_core::proto::SandboxStatus;
+    use openshell_core::proto::WorkloadBlockedKind;
 
     fn secs(seconds: u64) -> Duration {
         Duration::from_secs(seconds)
@@ -316,48 +262,12 @@ mod tests {
     }
 
     #[test]
-    fn report_becomes_condition_at_its_state_change() {
-        let done =
-            condition_from_report(&report(WorkloadProgramState::Done, 30, Some(90)), at(100))
-                .unwrap();
-        assert_eq!(done.reason, "Done");
-        assert_eq!(done.message, "claude-code is done");
-        assert_eq!(system_time(done.transition_time.as_ref()), Some(at(70)));
-        let typed =
-            condition_from_report(&report(WorkloadProgramState::Done, 30, Some(5)), at(100))
-                .unwrap();
-        assert_eq!(
-            system_time(typed.transition_time.as_ref()),
-            Some(at(70)),
-            "input does not move the displayed time"
-        );
-
-        let mut blocked = report(WorkloadProgramState::Blocked, 0, None);
-        blocked.blocked_kind = WorkloadBlockedKind::Permission.into();
-        blocked.app = "bad app\u{1b}".into();
-        let blocked = condition_from_report(&blocked, at(0)).unwrap();
-        assert_eq!(blocked.message, "badapp is blocked on permission");
-
-        assert!(
-            condition_from_report(&report(WorkloadProgramState::Unspecified, 0, None), at(0))
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn only_state_kind_and_app_change_the_display() {
-        let done = live(WorkloadProgramState::Done, 100, Some(90));
-        let typed = live(WorkloadProgramState::Done, 160, Some(1));
-        assert!(!done.shows_differently_from(&typed));
-        let working = live(WorkloadProgramState::Working, 160, None);
-        assert!(done.shows_differently_from(&working));
-        let mut other_app = typed;
-        other_app.report.app = "codex".into();
-        assert!(done.shows_differently_from(&other_app));
-        let mut blocked = live(WorkloadProgramState::Blocked, 160, None);
-        let question = blocked.clone();
-        blocked.report.blocked_kind = WorkloadBlockedKind::Permission.into();
-        assert!(blocked.shows_differently_from(&question));
+    fn program_names_are_reduced_to_safe_characters() {
+        let mut named = report(WorkloadProgramState::Done, 0, None);
+        named.app = "bad app\u{1b}".into();
+        assert_eq!(program_name(&named), "badapp");
+        named.app.clear();
+        assert_eq!(program_name(&named), "program");
     }
 
     #[test]

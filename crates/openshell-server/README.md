@@ -172,16 +172,8 @@ diagnosis or storage. This lifecycle behavior also applies when updates are disa
 The replica that holds a sandbox's supervisor session keeps that session's
 latest `SupervisorWorkloadActivity` report in memory, in gateway time, and only
 that report authorizes an idle stop. After a gateway restart or a session
-change, nothing stops until the current session reports. The same report is
-shown as the `ProgramStatus` condition, which is never stored. `GetSandbox` and
-each `WatchSandbox` snapshot attach it at read time, only while the sandbox is
-`Ready` and the report belongs to the running main-process instance. A replica
-without the session reads it from the owner with
-`PeerGetSandboxProgramStatus`. A report that changes the state, blocked kind,
-or app notifies local watchers; input alone does not. The first change
-notifies at once, and further changes within 2 seconds collapse into one
-notification at the end of that window. `ListSandboxes` and
-watchers on other replicas do not see it.
+change, nothing stops until the current session reports. Reports are never
+stored or shown to clients.
 
 Every replica sweeps its own sessions every 30 seconds. A sandbox becomes a
 candidate when it is Ready, its program is idle, done, blocked, or in error, and
