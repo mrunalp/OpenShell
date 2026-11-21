@@ -128,9 +128,7 @@ pub fn live_from_report(
 /// The effective idle timeout for a raw setting value, or `None` when idle
 /// stop is disabled.
 pub fn timeout_from_setting(seconds: Option<i64>) -> Option<Duration> {
-    let seconds = seconds.filter(|seconds| *seconds > 0)?;
-    let seconds = seconds.min(openshell_core::settings::MAX_IDLE_STOP_AFTER_SECONDS);
-    Some(Duration::from_secs(u64::try_from(seconds).ok()?))
+    openshell_core::settings::idle_stop_timeout(seconds)
 }
 
 /// When the sandbox began waiting on the user, or `None` while it is not.

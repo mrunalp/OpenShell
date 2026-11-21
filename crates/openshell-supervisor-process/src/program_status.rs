@@ -14,8 +14,9 @@
 //! from a supporting client terminal would reach the program as input.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use tokio::sync::watch;
@@ -572,9 +573,6 @@ impl Inner {
 pub struct ProgramActivity {
     inner: Mutex<Inner>,
     changes: watch::Sender<ActivitySummary>,
-    /// Held from snapshot to enqueue, so pushes and request replies leave in
-    /// snapshot order and carry increasing sequence numbers.
-    report_order: tokio::sync::Mutex<u64>,
 }
 
 impl ProgramActivity {
@@ -590,7 +588,6 @@ impl ProgramActivity {
                 revision: 0,
             }),
             changes,
-            report_order: tokio::sync::Mutex::new(0),
         })
     }
 
@@ -779,7 +776,7 @@ impl InputMarker {
 }
 
 /// How long held query bytes wait for the rest of the sequence.
-pub const PENDING_FLUSH: std::time::Duration = std::time::Duration::from_millis(20);
+pub const PENDING_FLUSH: Duration = Duration::from_millis(20);
 
 /// Read the next chunk to forward, observing it through `tap`. Returns `None`
 /// at end of stream after releasing any held bytes.
@@ -843,12 +840,73 @@ pub fn spawn_transition_log(activity: &Arc<ProgramActivity>) -> tokio::task::Joi
     })
 }
 
-/// How often the reporter checks for input that changed nothing else.
-const INPUT_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-/// Minimum spacing of input-only reports while a client keeps typing. New
-/// input is always reported within this interval plus one check, including
-/// the last keystroke before the client stops.
-const INPUT_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+/// How often the idle reporter re-evaluates between summary changes, so new
+/// input or a passed timeout is noticed within this long.
+#[cfg(not(test))]
+const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const IDLE_CHECK_INTERVAL: Duration = Duration::from_millis(10);
+/// While the program keeps waiting, the proposal is repeated this often in
+/// case the gateway declined it, for example under a longer gateway timeout.
+#[cfg(not(test))]
+const REPROPOSE_INTERVAL: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const REPROPOSE_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The sandbox's effective `idle_stop_after_seconds`, shared between the
+/// configuration poller that writes it and the idle reporters that read it.
+#[derive(Clone, Debug, Default)]
+pub struct IdleTimeout(Arc<AtomicU64>);
+
+impl IdleTimeout {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the timeout; `None` disables idle proposals.
+    pub fn set(&self, timeout: Option<Duration>) {
+        let millis = timeout.map_or(0, |timeout| {
+            u64::try_from(timeout.as_millis())
+                .unwrap_or(u64::MAX)
+                .max(1)
+        });
+        self.0.store(millis, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn get(&self) -> Option<Duration> {
+        match self.0.load(Ordering::Relaxed) {
+            0 => None,
+            millis => Some(Duration::from_millis(millis)),
+        }
+    }
+}
+
+/// How long the sandbox's programs have waited on the user with no client
+/// input, once that reaches `timeout`. `None` while any program works, while
+/// no program reports, or when idle stop is disabled.
+#[must_use]
+pub fn idle_past(
+    snapshot: &ActivitySnapshot,
+    timeout: Option<Duration>,
+    now: Instant,
+) -> Option<Duration> {
+    let timeout = timeout?;
+    if snapshot.summary.reporting_terminals == 0
+        || !snapshot
+            .summary
+            .state
+            .is_some_and(ProgramState::awaits_user)
+    {
+        return None;
+    }
+    let since = snapshot.last_input.map_or(snapshot.state_since, |input| {
+        input.max(snapshot.state_since)
+    });
+    let waited = now.saturating_duration_since(since);
+    (waited >= timeout).then_some(waited)
+}
 
 fn proto_state(state: Option<ProgramState>) -> openshell_core::proto::WorkloadProgramState {
     use openshell_core::proto::WorkloadProgramState as Proto;
@@ -872,54 +930,30 @@ fn proto_kind(kind: Option<BlockedKind>) -> openshell_core::proto::WorkloadBlock
     }
 }
 
-fn proto_age(since: Instant) -> Option<prost_types::Duration> {
-    openshell_core::time::duration_from_std(since.elapsed()).ok()
-}
-
-/// The gateway-bound report for a snapshot. Ages are measured now.
-#[must_use]
-pub fn activity_report(
+/// A proposal for `snapshot` that has waited `waited`, or the retraction of
+/// proposal `proposal_id` when `waited` is `None`.
+fn idle_message(
+    proposal_id: u64,
     snapshot: &ActivitySnapshot,
-) -> openshell_core::proto::SupervisorWorkloadActivity {
-    openshell_core::proto::SupervisorWorkloadActivity {
-        state: proto_state(snapshot.summary.state).into(),
-        blocked_kind: proto_kind(snapshot.summary.kind).into(),
-        app: snapshot.summary.app.clone().unwrap_or_default(),
-        state_age: proto_age(snapshot.state_since),
-        input_age: snapshot.last_input.and_then(proto_age),
-        reporting_terminals: u32::try_from(snapshot.summary.reporting_terminals)
-            .unwrap_or(u32::MAX),
-        request_id: String::new(),
-        sequence: 0,
-    }
-}
-
-impl ProgramActivity {
-    /// Snapshot the summary and enqueue it on `tx` as one ordered step.
-    /// `request_id` is set when the summary answers a gateway request.
-    /// Returns the snapshot that was sent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the session's outbound channel has closed.
-    pub async fn send_report(
-        &self,
-        tx: &tokio::sync::mpsc::Sender<openshell_core::proto::SupervisorMessage>,
-        request_id: &str,
-    ) -> Result<ActivitySnapshot, ()> {
-        let mut sequence = self.report_order.lock().await;
-        *sequence += 1;
-        let snapshot = self.snapshot();
-        let mut report = activity_report(&snapshot);
-        report.request_id = request_id.to_string();
-        report.sequence = *sequence;
-        let message = openshell_core::proto::SupervisorMessage {
-            payload: Some(
-                openshell_core::proto::supervisor_message::Payload::WorkloadActivity(report),
-            ),
-        };
-        tx.send(message).await.map_err(|_| ())?;
-        Ok(snapshot)
+    waited: Option<Duration>,
+) -> openshell_core::proto::SupervisorMessage {
+    let idle = waited.map_or_else(
+        || openshell_core::proto::SupervisorWorkloadIdle {
+            proposal_id,
+            idle: false,
+            ..Default::default()
+        },
+        |waited| openshell_core::proto::SupervisorWorkloadIdle {
+            proposal_id,
+            idle: true,
+            state: proto_state(snapshot.summary.state).into(),
+            blocked_kind: proto_kind(snapshot.summary.kind).into(),
+            app: snapshot.summary.app.clone().unwrap_or_default(),
+            idle_for: openshell_core::time::duration_from_std(waited).ok(),
+        },
+    );
+    openshell_core::proto::SupervisorMessage {
+        payload: Some(openshell_core::proto::supervisor_message::Payload::WorkloadIdle(idle)),
     }
 }
 
@@ -932,45 +966,41 @@ impl Drop for ReporterGuard {
     }
 }
 
-/// Whether new input alone warrants a report. Input only matters while the
-/// program waits on the user: a working program is never idle, and the next
-/// state change reports the input it missed.
-fn input_report_due(
-    snapshot: &ActivitySnapshot,
-    reported_input: Option<Instant>,
-    last_send: Option<Instant>,
-) -> bool {
-    snapshot.last_input != reported_input
-        && snapshot
-            .summary
-            .state
-            .is_some_and(ProgramState::awaits_user)
-        && last_send.is_none_or(|sent| sent.elapsed() >= INPUT_REPORT_INTERVAL)
-}
-
-/// Report activity on one gateway session: once at start, on every summary
-/// change, and within seconds of new client input while the program waits
-/// on the user.
-pub fn spawn_activity_reporter(
+/// Propose an idle stop on one gateway session once the sandbox's programs
+/// have waited on the user past `timeout`, repeat it while they keep waiting,
+/// and retract it as soon as input or a state change ends the wait.
+pub fn spawn_idle_reporter(
     activity: &Arc<ProgramActivity>,
+    timeout: IdleTimeout,
     tx: tokio::sync::mpsc::Sender<openshell_core::proto::SupervisorMessage>,
 ) -> ReporterGuard {
     let activity = Arc::clone(activity);
     let mut changes = activity.subscribe();
     ReporterGuard(tokio::spawn(async move {
-        let mut input_check = tokio::time::interval(INPUT_CHECK_INTERVAL);
-        input_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut reported_input: Option<Instant> = None;
-        let mut last_send: Option<Instant> = None;
-        let mut send_now = true;
+        let mut check = tokio::time::interval(IDLE_CHECK_INTERVAL);
+        check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_id = 0;
+        // The outstanding proposal and when it was sent.
+        let mut proposed: Option<(u64, Instant)> = None;
         loop {
             let snapshot = activity.snapshot();
-            if send_now || input_report_due(&snapshot, reported_input, last_send) {
-                let Ok(sent) = activity.send_report(&tx, "").await else {
+            let now = Instant::now();
+            let message = match (proposed, idle_past(&snapshot, timeout.get(), now)) {
+                (None, Some(waited)) => Some((last_id + 1, Some(waited))),
+                (Some((_, sent)), Some(waited))
+                    if now.saturating_duration_since(sent) >= REPROPOSE_INTERVAL =>
+                {
+                    Some((last_id + 1, Some(waited)))
+                }
+                (Some((id, _)), None) => Some((id, None)),
+                _ => None,
+            };
+            if let Some((id, waited)) = message {
+                if tx.send(idle_message(id, &snapshot, waited)).await.is_err() {
                     return;
-                };
-                reported_input = sent.last_input;
-                last_send = Some(Instant::now());
+                }
+                last_id = id;
+                proposed = waited.map(|_| (id, now));
             }
             tokio::select! {
                 result = changes.changed() => {
@@ -978,9 +1008,8 @@ pub fn spawn_activity_reporter(
                         return;
                     }
                     changes.borrow_and_update();
-                    send_now = true;
                 }
-                _ = input_check.tick() => send_now = false,
+                _ = check.tick() => {}
             }
         }
     }))
@@ -1245,7 +1274,7 @@ mod tests {
         let mut changes = activity.subscribe();
         changes.borrow_and_update();
         let before = activity.snapshot();
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
         tap.output(b"\x1b]7501;state=working\x07\x1b]7501;state=done\x07");
         let after = activity.snapshot();
         assert_eq!(after.summary.state, Some(ProgramState::Done));
@@ -1278,74 +1307,6 @@ mod tests {
         }
         // The last published summary is the final state, never an older one.
         assert_eq!(*changes.borrow_and_update(), activity.snapshot().summary);
-    }
-
-    fn received(
-        message: openshell_core::proto::SupervisorMessage,
-    ) -> openshell_core::proto::SupervisorWorkloadActivity {
-        let Some(openshell_core::proto::supervisor_message::Payload::WorkloadActivity(report)) =
-            message.payload
-        else {
-            panic!("expected workload activity");
-        };
-        report
-    }
-
-    #[tokio::test]
-    async fn replies_carry_the_request_id_and_every_summary_a_new_sequence() {
-        let activity = ProgramActivity::new();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        activity.send_report(&tx, "req-1").await.unwrap();
-        activity.send_report(&tx, "").await.unwrap();
-        let reply = received(rx.recv().await.unwrap());
-        let push = received(rx.recv().await.unwrap());
-        assert_eq!(reply.request_id, "req-1");
-        assert!(push.request_id.is_empty());
-        assert!(push.sequence > reply.sequence);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn replies_and_pushes_leave_in_snapshot_order() {
-        let activity = ProgramActivity::new();
-        let mut tap = activity.register(|_| {});
-        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
-        let mut senders = Vec::new();
-        for index in 0..32 {
-            let activity = Arc::clone(&activity);
-            let tx = tx.clone();
-            senders.push(tokio::spawn(async move {
-                let request = if index % 2 == 0 { "req" } else { "" };
-                activity.send_report(&tx, request).await.unwrap();
-            }));
-            let report: &[u8] = if index % 2 == 0 {
-                b"\x1b]7501;state=working\x07"
-            } else {
-                b"\x1b]7501;state=done\x07"
-            };
-            tap.output(report);
-        }
-        for sender in senders {
-            sender.await.unwrap();
-        }
-        activity.send_report(&tx, "").await.unwrap();
-        drop(tx);
-        let mut last = 0;
-        let mut final_state = 0;
-        while let Some(message) = rx.recv().await {
-            let report = received(message);
-            assert!(
-                report.sequence > last,
-                "sequence {} after {last}",
-                report.sequence
-            );
-            last = report.sequence;
-            final_state = report.state;
-        }
-        assert_eq!(
-            final_state,
-            i32::from(openshell_core::proto::WorkloadProgramState::Done),
-            "the newest summary is the last one sent"
-        );
     }
 
     #[test]
@@ -1387,64 +1348,108 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn reporter_sends_on_start_and_on_every_state_change() {
-        use openshell_core::proto::{WorkloadProgramState, supervisor_message::Payload};
-        let activity = ProgramActivity::new();
-        let mut tap = activity.register(|_| {});
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        let guard = spawn_activity_reporter(&activity, tx);
-        let next_state = async |rx: &mut tokio::sync::mpsc::Receiver<_>| {
-            let message: openshell_core::proto::SupervisorMessage = rx.recv().await.unwrap();
-            let Some(Payload::WorkloadActivity(report)) = message.payload else {
-                panic!("expected workload activity");
-            };
-            report.state
-        };
-        assert_eq!(
-            next_state(&mut rx).await,
-            i32::from(WorkloadProgramState::Unspecified)
-        );
-        tap.output(b"\x1b]7501;state=working:app=claude-code\x07");
-        assert_eq!(
-            next_state(&mut rx).await,
-            i32::from(WorkloadProgramState::Working)
-        );
-        tap.output(b"\x1b]7501;state=done:app=claude-code\x07");
-        assert_eq!(
-            next_state(&mut rx).await,
-            i32::from(WorkloadProgramState::Done)
-        );
-        drop(guard);
-        tokio::task::yield_now().await;
-        tap.output(b"\x1b]7501;state=working\x07");
-        assert!(rx.recv().await.is_none(), "the guard ends the reporter");
+    fn snapshot_waiting(state: Option<ProgramState>, waited: Duration) -> ActivitySnapshot {
+        let since = Instant::now().checked_sub(waited).unwrap();
+        ActivitySnapshot {
+            summary: ActivitySummary {
+                state,
+                reporting_terminals: usize::from(state.is_some()),
+                ..ActivitySummary::default()
+            },
+            last_output: None,
+            last_input: None,
+            state_since: since,
+        }
     }
 
     #[test]
-    fn input_alone_is_reported_only_while_the_program_waits() {
+    fn only_a_wait_past_the_timeout_with_no_input_is_idle() {
+        let minute = Duration::from_secs(60);
+        let now = Instant::now();
+        let done = snapshot_waiting(Some(ProgramState::Done), minute * 2);
+        assert!(idle_past(&done, Some(minute), now).is_some_and(|waited| waited > minute));
+        assert_eq!(idle_past(&done, None, now), None, "disabled");
+        assert_eq!(idle_past(&done, Some(minute * 3), now), None, "not yet");
+        let working = snapshot_waiting(Some(ProgramState::Working), minute * 2);
+        assert_eq!(idle_past(&working, Some(minute), now), None);
+        let silent = snapshot_waiting(None, minute * 2);
+        assert_eq!(idle_past(&silent, Some(minute), now), None);
+        let mut typed = done;
+        typed.last_input = now.checked_sub(Duration::from_secs(5));
+        assert_eq!(
+            idle_past(&typed, Some(minute), now),
+            None,
+            "input resets the wait"
+        );
+    }
+
+    #[test]
+    fn idle_timeouts_round_trip_and_zero_disables() {
+        let timeout = IdleTimeout::new();
+        assert_eq!(timeout.get(), None);
+        timeout.set(Some(Duration::from_secs(1800)));
+        assert_eq!(timeout.get(), Some(Duration::from_secs(1800)));
+        timeout.set(None);
+        assert_eq!(timeout.get(), None);
+    }
+
+    fn idle_received(
+        message: openshell_core::proto::SupervisorMessage,
+    ) -> openshell_core::proto::SupervisorWorkloadIdle {
+        let Some(openshell_core::proto::supervisor_message::Payload::WorkloadIdle(idle)) =
+            message.payload
+        else {
+            panic!("expected a workload idle message");
+        };
+        idle
+    }
+
+    #[tokio::test]
+    async fn the_reporter_proposes_repeats_and_retracts_on_input() {
         let activity = ProgramActivity::new();
         let mut tap = activity.register(|_| {});
-        let long_ago = Instant::now().checked_sub(INPUT_REPORT_INTERVAL * 2);
-        let marker = tap.input_marker();
+        let timeout = IdleTimeout::new();
+        timeout.set(Some(Duration::from_millis(30)));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let guard = spawn_idle_reporter(&activity, timeout, tx);
+        let next = async |rx: &mut tokio::sync::mpsc::Receiver<_>| {
+            idle_received(
+                tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("the reporter sends")
+                    .unwrap(),
+            )
+        };
+
         tap.output(b"\x1b]7501;state=working:app=codex\x07");
-        marker.mark();
-        assert!(
-            !input_report_due(&activity.snapshot(), None, long_ago),
-            "input to a working program waits for its next state change"
-        );
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(rx.try_recv().is_err(), "a working program is never idle");
+
         tap.output(b"\x1b]7501;state=done:app=codex\x07");
-        marker.mark();
-        let snapshot = activity.snapshot();
-        assert!(input_report_due(&snapshot, None, long_ago));
-        assert!(
-            !input_report_due(&snapshot, snapshot.last_input, long_ago),
-            "input already reported is not reported again"
+        let proposal = next(&mut rx).await;
+        assert!(proposal.idle);
+        assert_eq!(proposal.proposal_id, 1);
+        assert_eq!(proposal.app, "codex");
+        assert_eq!(
+            proposal.state,
+            i32::from(openshell_core::proto::WorkloadProgramState::Done)
         );
-        assert!(
-            !input_report_due(&snapshot, None, Some(Instant::now())),
-            "input reports are spaced"
-        );
+        let repeat = next(&mut rx).await;
+        assert!(repeat.idle);
+        assert_eq!(repeat.proposal_id, 2, "a repeat carries a new id");
+
+        tap.input_marker().mark();
+        let retraction = next(&mut rx).await;
+        assert!(!retraction.idle);
+        assert_eq!(retraction.proposal_id, 2, "it retracts the last proposal");
+        let again = next(&mut rx).await;
+        assert!(again.idle, "a new wait past the timeout proposes again");
+        assert_eq!(again.proposal_id, 3);
+
+        tap.output(b"\x1b]7501;state=working:app=codex\x07");
+        let retraction = next(&mut rx).await;
+        assert!(!retraction.idle, "a new turn retracts");
+        drop(guard);
     }
 
     #[tokio::test]

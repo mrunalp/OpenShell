@@ -117,6 +117,15 @@ pub const IDLE_STOP_AFTER_SECONDS_KEY: &str = "idle_stop_after_seconds";
 /// Longest effective idle stop timeout: 30 days.
 pub const MAX_IDLE_STOP_AFTER_SECONDS: i64 = 30 * 24 * 60 * 60;
 
+/// The effective idle stop timeout for a raw `idle_stop_after_seconds` value,
+/// or `None` when idle stop is disabled.
+#[must_use]
+pub fn idle_stop_timeout(seconds: Option<i64>) -> Option<std::time::Duration> {
+    let seconds = seconds.filter(|seconds| *seconds > 0)?;
+    let seconds = seconds.min(MAX_IDLE_STOP_AFTER_SECONDS);
+    Some(std::time::Duration::from_secs(u64::try_from(seconds).ok()?))
+}
+
 pub const REGISTERED_SETTINGS: &[RegisteredSetting] = &[
     // When true the supervisor emits OCSF-JSON records to stderr and writes
     // JSONL to `/var/log/openshell-ocsf*.jsonl` when file logging is available.

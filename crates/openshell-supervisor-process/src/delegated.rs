@@ -95,6 +95,7 @@ pub async fn start_boundary_access(
     host_key: Option<russh::keys::PrivateKey>,
     gateway_home: Option<tokio::sync::watch::Receiver<Option<String>>>,
     app_installations: Option<openshell_core::app_listener::InstallationSource>,
+    idle_timeout: crate::program_status::IdleTimeout,
 ) -> Result<BoundaryAccess> {
     let instance_id = uuid::Uuid::new_v4().to_string();
     let terminating = Arc::new(AtomicBool::new(false));
@@ -135,6 +136,7 @@ pub async fn start_boundary_access(
                     config_push_updates,
                     gateway_home,
                     workload_activity: Some(main_session.program_activity().clone()),
+                    idle_timeout,
                 },
             );
             (Some(task), Some(accepted))
@@ -381,6 +383,7 @@ mod tests {
             None,
             None,
             None,
+            crate::program_status::IdleTimeout::new(),
         )
         .await
         .expect("access without SSH is portable");
@@ -424,6 +427,7 @@ mod tests {
             None,
             None,
             None,
+            crate::program_status::IdleTimeout::new(),
         )
         .await;
         assert!(
