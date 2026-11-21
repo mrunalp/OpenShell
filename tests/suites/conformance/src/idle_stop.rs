@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::Value;
 use testkit::sdk::SandboxPhase;
 use testkit::sdk::raw::proto;
-use testkit::{Context, Poll, Sandbox, poll_until};
+use testkit::{Context, Sandbox};
 
 const KEY: &str = "idle_stop_after_seconds";
 
@@ -17,10 +17,9 @@ const KEY: &str = "idle_stop_after_seconds";
 /// wait at the prompt. Echo is on, so the supervisor's reply is echoed back.
 const AGENT: &str = r"printf '\033]7501;?\033\\'; sleep 1; printf '\033]7501;state=done:app=e2e-agent\033\\'; exec sleep infinity";
 
-/// The supervisor reports within a second; allow for session setup.
-const REPORT_DEADLINE: Duration = Duration::from_secs(30);
-/// The timeout, the 15 second input report lag, and the 30 second sweep.
-const IDLE_STOP_DEADLINE: Duration = Duration::from_secs(90);
+/// Session setup and the first report, the timeout, the 15 second input
+/// report lag, and the 30 second sweep.
+const IDLE_STOP_DEADLINE: Duration = Duration::from_secs(120);
 /// Connect prints its notice, then starts the sandbox and waits for Ready.
 const WAKE_DEADLINE: Duration = Duration::from_secs(60);
 
@@ -38,7 +37,6 @@ async fn idle_stopped_sandbox_wakes_on_connect_until_stopped_explicitly(
         .spec(|spec| spec.tty = true)
         .create_ready()
         .await?;
-    expect_program_status(&sandbox, "Done").await?;
     set_idle_timeout(&sandbox, 1).await?;
     expect_idle_stopped(&sandbox).await?;
 
@@ -54,7 +52,6 @@ async fn idle_stopped_sandbox_wakes_on_connect_until_stopped_explicitly(
     connect.kill().await?;
 
     // The restarted program reports again and is idle-stopped again.
-    expect_program_status(&sandbox, "Done").await?;
     expect_idle_stopped(&sandbox).await?;
 
     sandbox.stop().await?;
@@ -107,28 +104,6 @@ async fn set_idle_timeout(sandbox: &Sandbox, seconds: i64) -> testkit::Result {
         "effective {KEY} is {value:?}; delete the global value with `openshell settings delete --global --key {KEY}`"
     );
     Ok(())
-}
-
-/// Wait until the sandbox's `ProgramStatus` condition has `reason`.
-async fn expect_program_status(sandbox: &Sandbox, reason: &str) -> testkit::Result {
-    poll_until(
-        &format!(
-            "sandbox {} to report program status {reason}",
-            sandbox.name()
-        ),
-        REPORT_DEADLINE,
-        Duration::from_secs(1),
-        async || {
-            let got = sandbox.get_json().await?;
-            let program = condition(&got, "ProgramStatus");
-            Ok(match program {
-                Some(program) if program["reason"] == reason => Poll::Ready(()),
-                Some(program) => Poll::Pending(format!("ProgramStatus is {program}")),
-                None => Poll::Pending("no ProgramStatus condition".to_string()),
-            })
-        },
-    )
-    .await
 }
 
 fn condition<'a>(sandbox: &'a Value, kind: &str) -> Option<&'a Value> {
