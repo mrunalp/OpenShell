@@ -2256,7 +2256,7 @@ struct ConfigPushSetup {
 /// session task or drops with early cleanup.
 struct SessionSetup {
     advertises_services: bool,
-    confirms_activity: bool,
+    proposes_idle: bool,
     state: Arc<ServerState>,
     sandbox_id: String,
     instance_id: String,
@@ -2276,7 +2276,7 @@ struct SessionSetup {
 async fn accept_supervisor_session(setup: SessionSetup) -> Result<(), Status> {
     let SessionSetup {
         advertises_services,
-        confirms_activity,
+        proposes_idle,
         state,
         sandbox_id,
         instance_id,
@@ -2543,7 +2543,7 @@ async fn accept_supervisor_session(setup: SessionSetup) -> Result<(), Status> {
         supports_session_redirect,
         pushes_config,
         advertises_services,
-        confirms_activity,
+        proposes_idle,
     };
     tokio::spawn(async move {
         let _session_lifetime = session_lifetime;
@@ -2681,7 +2681,7 @@ pub async fn handle_connect_supervisor(
     let setup = SessionSetup {
         advertises_services: state.config.supervisor_app_listener.enabled
             && hello.supports_service_advertisements,
-        confirms_activity: hello.supports_workload_activity_requests,
+        proposes_idle: hello.supports_idle_proposals,
         state: Arc::clone(state),
         sandbox_id,
         instance_id: hello.instance_id,
@@ -2959,9 +2959,8 @@ pub(crate) struct AcceptedSession {
     /// polling.
     pub(crate) pushes_config: bool,
     pub(crate) advertises_services: bool,
-    /// The supervisor answers `WorkloadActivityRequest`, so its sandbox can be
-    /// idle-stopped after it confirms.
-    pub(crate) confirms_activity: bool,
+    /// The supervisor proposes idle stops, so its sandbox can be idle-stopped.
+    pub(crate) proposes_idle: bool,
 }
 
 async fn run_session_loop(
@@ -3184,20 +3183,14 @@ async fn handle_supervisor_message(
                 return false;
             }
         }
-        Some(supervisor_message::Payload::WorkloadActivity(report)) => {
-            if let Err(error) = state
-                .compute
-                .record_workload_activity(
-                    sandbox_id,
-                    session_id,
-                    &session.instance_id,
-                    session.confirms_activity,
-                    &report,
-                )
-                .await
-            {
-                debug!(sandbox_id = %sandbox_id, %error, "failed to record workload activity");
-            }
+        Some(supervisor_message::Payload::WorkloadIdle(idle)) => {
+            state.compute.record_workload_idle(
+                sandbox_id,
+                session_id,
+                &session.instance_id,
+                session.proposes_idle,
+                &idle,
+            );
         }
         _ => {
             warn!(
@@ -3418,7 +3411,7 @@ mod tests {
         let mut inbound = futures::stream::pending::<Result<SupervisorMessage, Status>>();
         let session = AcceptedSession {
             advertises_services: false,
-            confirms_activity: false,
+            proposes_idle: false,
             state: Arc::clone(&state),
             sandbox_id: "sb-no-peer".into(),
             session_id: "session-no-peer".into(),
@@ -5985,7 +5978,7 @@ mod tests {
         let mut inbound = futures::stream::iter([Ok(failure)]).chain(futures::stream::pending());
         let session = AcceptedSession {
             advertises_services: false,
-            confirms_activity: false,
+            proposes_idle: false,
             state: Arc::clone(&state),
             sandbox_id: "sb-replaced".into(),
             session_id: "session-a".into(),
@@ -6077,7 +6070,7 @@ mod tests {
         let mut inbound = futures::stream::iter([Ok(heartbeat)]).chain(futures::stream::pending());
         let session = AcceptedSession {
             advertises_services: false,
-            confirms_activity: false,
+            proposes_idle: false,
             state: Arc::clone(&state),
             sandbox_id: "sb-moved".into(),
             session_id: "session-replaced".into(),

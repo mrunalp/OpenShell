@@ -849,7 +849,7 @@ const IDLE_CHECK_INTERVAL: Duration = Duration::from_millis(10);
 /// While the program keeps waiting, the proposal is repeated this often in
 /// case the gateway declined it, for example under a longer gateway timeout.
 #[cfg(not(test))]
-const REPROPOSE_INTERVAL: Duration = Duration::from_secs(60);
+const REPROPOSE_INTERVAL: Duration = Duration::from_mins(1);
 #[cfg(test)]
 const REPROPOSE_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -966,9 +966,11 @@ impl Drop for ReporterGuard {
     }
 }
 
-/// Propose an idle stop on one gateway session once the sandbox's programs
-/// have waited on the user past `timeout`, repeat it while they keep waiting,
-/// and retract it as soon as input or a state change ends the wait.
+/// Propose idle stops on one gateway session.
+///
+/// The reporter proposes once the sandbox's programs have waited on the user
+/// past `timeout`, repeats the proposal while they keep waiting, and retracts
+/// it as soon as input or a state change ends the wait.
 pub fn spawn_idle_reporter(
     activity: &Arc<ProgramActivity>,
     timeout: IdleTimeout,
@@ -1364,7 +1366,7 @@ mod tests {
 
     #[test]
     fn only_a_wait_past_the_timeout_with_no_input_is_idle() {
-        let minute = Duration::from_secs(60);
+        let minute = Duration::from_mins(1);
         let now = Instant::now();
         let done = snapshot_waiting(Some(ProgramState::Done), minute * 2);
         assert!(idle_past(&done, Some(minute), now).is_some_and(|waited| waited > minute));
@@ -1387,8 +1389,8 @@ mod tests {
     fn idle_timeouts_round_trip_and_zero_disables() {
         let timeout = IdleTimeout::new();
         assert_eq!(timeout.get(), None);
-        timeout.set(Some(Duration::from_secs(1800)));
-        assert_eq!(timeout.get(), Some(Duration::from_secs(1800)));
+        timeout.set(Some(Duration::from_mins(30)));
+        assert_eq!(timeout.get(), Some(Duration::from_mins(30)));
         timeout.set(None);
         assert_eq!(timeout.get(), None);
     }
