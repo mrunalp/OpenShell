@@ -169,49 +169,32 @@ diagnosis or storage. This lifecycle behavior also applies when updates are disa
 
 ## Idle stop
 
-The replica that holds a sandbox's supervisor session keeps that session's
-latest `SupervisorWorkloadActivity` report in memory, in gateway time, and only
-that report authorizes an idle stop. After a gateway restart or a session
-change, nothing stops until the current session reports. Reports are never
-stored or shown to clients.
+The supervisor owns the idle clock and sends a `SupervisorWorkloadIdle`
+proposal once its sandbox's program has waited on the user past the sandbox's
+`idle_stop_after_seconds`. It retracts the proposal when input or a new turn
+ends the wait. The replica that holds the supervisor session keeps the
+session's latest proposal in memory; only that proposal starts an idle stop.
+A proposal from a replaced session, or an older one from the current session,
+is dropped. Nothing is stored, and after a gateway restart or a session change
+nothing stops until the current session proposes again. Supervisors that do
+not advertise `supports_idle_proposals` are never idle-stopped.
 
-Every replica sweeps its own sessions every 30 seconds. A sandbox becomes a
-candidate when it is Ready, its program is idle, done, blocked, or in error, and
-`idle_stop_after_seconds` (gateway scope, then sandbox scope) plus a 15-second
-input report lag has elapsed. The lag runs from the later of the report's time
-and the main-process start.
+A proposal starts one idle stop per sandbox at a time, through the ordinary
+stop path. Before the `Stopping` write, under the lifecycle lock, each write
+attempt requires:
 
-A sweep starts at most one idle stop per sandbox at a time. Before taking any
-lifecycle lock, the stop task does three things:
+- the proposal from the same session still held;
+- a `Ready` sandbox on the proposing main-process instance;
+- the gateway's own effective timeout (gateway scope wins), reached by the
+  proposal's wait, so a supervisor still on an older, shorter setting does not
+  decide;
+- a fresh shared owner record that names the session.
 
-1. Requires a fresh shared owner record naming the session.
-2. Sends a `WorkloadActivityRequest`.
-3. Waits up to 5 seconds for a fresh report.
-
-Supervisors that do not advertise `supports_workload_activity_requests` are
-never idle-stopped. Under the lifecycle lock, each `Stopping` write attempt then
-runs a final check. It requires:
-
-- a confirmation at most 2 seconds old;
-- the re-read setting;
-- a still-due live report from the confirming session;
-- a fresh owner record that still names that session.
-
-The final check bounds every wait by the confirmation's deadline and holds that
-sandbox's activity gate through the write. The deadline is checked again just
-before the write is issued, and an attempt that passes it is abandoned. Every
-live report update takes the same gate. A report that takes the gate before
-the final check counts. One that reaches the handler while the stop holds the
-gate waits behind that write. A conflicting write releases the gate and checks
-again. The confirmation, with its session and reply arrival time, travels with
-that one stop attempt.
-
-A report is recorded only while its session is still current, checked under the
-gate, so a superseded session's late report never displaces its replacement's.
-
-Live reports carry the supervisor's summary sequence, and an older summary from
-the same session is dropped. Recording a report writes nothing to the store,
-so the session never waits on the sandbox lock to read its next message.
+After the write and before the driver call, the stop checks the proposal again.
+A retraction or session change received in between rolls the sandbox back to
+its previous state and abandons the stop. If that rollback loses a write race,
+the stop goes ahead like any other in-flight stop. Recording a proposal never
+waits on a store write or the sandbox lock.
 
 The stop records the `internal.openshell.ai/idle-stop` annotation with
 `IdleStopping`. That marker survives gateway recovery and settles the stop as

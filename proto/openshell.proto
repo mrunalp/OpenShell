@@ -3463,29 +3463,30 @@ message SupervisorMessage {
     RelayClose relay_close = 4;
     ConfigUpdateResult config_update_result = 5;
     SupervisorServiceAdvertisement service_advertisement = 6;
-    SupervisorWorkloadActivity workload_activity = 7;
+    SupervisorWorkloadIdle workload_idle = 7;
   }
 }
 
-// Program status summary across workload terminals. Sent when each session
-// starts, when the summary changes, and within seconds of new client input.
-// Ages are relative so supervisor and gateway clocks need not agree.
-message SupervisorWorkloadActivity {
-  WorkloadProgramState state = 1;
-  WorkloadBlockedKind blocked_kind = 2;
-  string app = 3;
-  // Time spent in `state`.
-  google.protobuf.Duration state_age = 4;
-  // Time since the latest client input to a workload terminal. Absent when no
-  // client has written to one.
-  google.protobuf.Duration input_age = 5;
-  // Workload terminals with a current program report.
-  uint32 reporting_terminals = 6;
-  // Set when this summary answers a WorkloadActivityRequest.
-  string request_id = 7;
-  // Increases with every summary the supervisor sends, pushes and replies
-  // alike. The gateway drops a summary older than the one it holds.
-  uint64 sequence = 8;
+// The supervisor's idle proposal for its sandbox, or its retraction.
+//
+// The supervisor applies the sandbox's effective `idle_stop_after_seconds`
+// itself. When a workload terminal's program has waited on the user, with no
+// client input, for that long, it sends a proposal (`idle` true). It repeats
+// the proposal with a new `proposal_id` about once a minute while the program
+// keeps waiting. Any input or state change that ends the wait sends a
+// retraction (`idle` false) carrying the last proposal's id. Each gateway
+// session starts its own ids at 1.
+message SupervisorWorkloadIdle {
+  // Increases with every proposal on this session. A retraction repeats the
+  // id of the proposal it ends.
+  uint64 proposal_id = 1;
+  bool idle = 2;
+  // The waiting program's state, kind, and app, for logs. Set on proposals.
+  WorkloadProgramState state = 3;
+  WorkloadBlockedKind blocked_kind = 4;
+  string app = 5;
+  // How long the program has waited, with no client input, when sent.
+  google.protobuf.Duration idle_for = 6;
 }
 
 // Envelope for gateway-to-supervisor messages on the ConnectSupervisor stream.
@@ -3499,16 +3500,7 @@ message GatewayMessage {
     SessionRedirect session_redirect = 6;
     ConfigUpdate config_update = 7;
     ServiceRouteLease service_route_lease = 8;
-    WorkloadActivityRequest workload_activity_request = 9;
   }
-}
-
-// Ask the supervisor for a current program status summary before an idle
-// stop. Sent only to supervisors that advertise
-// `supports_workload_activity_requests`. The reply is a
-// SupervisorWorkloadActivity carrying the same `request_id`.
-message WorkloadActivityRequest {
-  string request_id = 1;
 }
 
 // Supervisor identifies itself and the sandbox it manages.
@@ -3537,10 +3529,9 @@ message SupervisorHello {
   // Gateways push configuration only to supervisors that set this.
   bool supports_config_push = 7;
   bool supports_service_advertisements = 8;
-  // The supervisor reports workload program status and answers
-  // WorkloadActivityRequest. Gateways idle-stop only sandboxes whose current
-  // supervisor confirms idleness this way.
-  bool supports_workload_activity_requests = 9;
+  // The supervisor sends SupervisorWorkloadIdle proposals and retractions.
+  // Gateways idle-stop only sandboxes whose current supervisor sets this.
+  bool supports_idle_proposals = 10;
 }
 
 // Gateway accepts the supervisor session.

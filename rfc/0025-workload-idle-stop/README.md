@@ -12,9 +12,9 @@ links:
 ## Summary
 
 The supervisor reads the program status that coding agents already write to
-their terminal with OSC 7501, the Program Status Protocol. It reports a
-sandbox-wide activity summary to the gateway, which can then stop a sandbox
-whose agent has been waiting on the user for longer than a configured timeout.
+their terminal with OSC 7501, the Program Status Protocol. When an agent has
+been waiting on the user for longer than a configured timeout, the supervisor
+proposes an idle stop and the gateway stops the sandbox.
 A later `openshell sandbox connect` starts the sandbox again before connecting.
 
 Phase 1 uses the existing stop and start lifecycle. Filesystem state survives,
@@ -130,140 +130,103 @@ Neither agent returns to `idle` after a finished turn, so the policy treats
 `done` as waiting on the user. Codex reports without querying first, so the
 scanner keeps records for every terminal whether or not its program asked.
 
-### Report activity to the gateway
+### Propose idle stops from the supervisor
 
-A new `ConnectSupervisor` payload carries the summary:
+The supervisor owns the idle clock. It already tracks when the sandbox-wide
+state began and when client input last arrived, and it receives runtime
+settings through its configuration poller. It applies the sandbox's effective
+`idle_stop_after_seconds` itself and tells the gateway only when to stop:
 
 ```proto
 message SupervisorMessage {
   oneof payload {
     // ... existing variants 1-6 ...
-    SupervisorWorkloadActivity workload_activity = 7;
+    SupervisorWorkloadIdle workload_idle = 7;
   }
 }
 
-message SupervisorWorkloadActivity {
-  WorkloadProgramState state = 1;          // UNSPECIFIED: no program reports
-  WorkloadBlockedKind blocked_kind = 2;
-  string app = 3;                          // OSC 7501 app grammar
-  google.protobuf.Duration state_age = 4;  // time in `state`
-  google.protobuf.Duration input_age = 5;  // since last client input, if any
-  uint32 reporting_terminals = 6;
-  string request_id = 7;                   // set when answering a request
-  uint64 sequence = 8;                     // increases with every summary
-}
-
-message GatewayMessage {
-  oneof payload {
-    // ... existing variants 1-8 ...
-    WorkloadActivityRequest workload_activity_request = 9;
-  }
-}
-
-message WorkloadActivityRequest {
-  string request_id = 1;
+message SupervisorWorkloadIdle {
+  uint64 proposal_id = 1;                 // increases per proposal on a session
+  bool idle = 2;                          // true: proposal; false: retraction
+  WorkloadProgramState state = 3;         // for logs
+  WorkloadBlockedKind blocked_kind = 4;
+  string app = 5;                         // OSC 7501 app grammar
+  google.protobuf.Duration idle_for = 6;  // wait when sent
 }
 ```
 
-`SupervisorHello.supports_workload_activity_requests` (field 9) advertises
-that the supervisor answers requests. As with every stream payload, the gateway
-sends requests only to supervisors that advertise it.
+`SupervisorHello.supports_idle_proposals` (field 10) advertises it. The gateway
+idle-stops only sandboxes whose current supervisor sets it, so a supervisor
+too old to propose is never stopped.
 
-Ages are relative so supervisor and gateway clocks need not agree. The
-supervisor sends the summary when each gateway session starts, on every change,
-and, while the program waits on the user, within 15 seconds of new client
-input, including the last keystroke before typing stops. Input to a working
-program is reported with its next state change. The latest input time outlives the terminal that received it.
-`reporting_terminals` counts terminals with a current report, whether or not
-their program sent the support query.
+On each gateway session, an idle reporter checks every second and on every
+summary change. Once some program reports, none is `working`, and the later of
+the state change and the latest client input is older than the timeout, it
+sends a proposal. While the wait continues it repeats the proposal with a new
+id every minute, in case the gateway declined it under a longer gateway-side
+setting. Input or a state change that ends the wait sends a retraction with
+the last proposal's id. Each session starts its ids at 1, so a reconnect, or a
+session moved to another replica, proposes again. The reporter runs on its
+own task and never blocks the session's receive loop.
 
 The supervisor applies reports, OSC 133 `A` prompts, and full resets (RIS) in
 output order, however reads split them. A prompt ends only the reports before
-it, and a reset clears the terminal's records as the spec requires. Every
+it, and a reset clears the terminal's records as the spec requires. The
+scanner treats `ESC c` outside an OSC as a reset, including inside other
+control strings; a terminal ends those strings at `ESC` and resets too. Every
 transition restarts the state timer and advances a revision, including a
-`working` → `done` turn within one read. Summaries are published in mutation
-order, so concurrent terminals never hide a transition from the reporter.
+`working` → `done` turn within one read. The latest input time outlives the
+terminal that received it.
 
-The replica holding the supervisor session keeps that session's latest report
-in memory. Only that live report authorizes an idle stop. Reports write nothing
-to the store and add no public `Sandbox` fields, so SDK users who build
-exhaustive `SandboxStatus` literals still compile, as the
-`sandbox_status_compatibility` fixture requires. The supervisor sends
-input-only reports only while the program waits on the user.
+Proposals write nothing to the store and add no public `Sandbox` fields, so
+SDK users who build exhaustive `SandboxStatus` literals still compile, as the
+`sandbox_status_compatibility` fixture requires.
 
 ### Stop idle sandboxes
-
-A sandbox is idle when all of these hold:
-
-- its phase is `Ready`;
-- the live report from its current supervisor session, for the running
-  main-process instance, is `idle`, `done`, `blocked`, or `error`, so no
-  terminal is `working`;
-- the later of that report's time and `main_process_started_time` is older
-  than the idle timeout plus a 15-second input report lag;
-- at admission, the supervisor confirms it with a fresh report.
 
 The timeout is a new runtime setting, `idle_stop_after_seconds`, set with
 `openshell settings set` at gateway or sandbox scope. As with every runtime
 setting, gateway scope wins over sandbox scope. It can be changed on a running
-sandbox. Unset, zero, or negative disables idle stop, and values above 30 days
-are capped. No new `SandboxSpec` field or gateway TOML key is needed.
+sandbox and reaches the supervisor with its next configuration update. Unset,
+zero, or negative disables idle stop, and values above 30 days are capped. No
+new `SandboxSpec` field or gateway TOML key is needed.
 
-Every replica sweeps the sandboxes of its own supervisor sessions every 30
-seconds and reads settings only for those already waiting. A gateway that
-restarts, or a session that moves to another replica, stops nothing until the
-new session reports, so a workload that resumed work during an outage is not
-stopped on a stale record. Each due sandbox goes through the existing stop path
-on its own task, with an idle cause.
+The replica holding the supervisor session keeps that session's latest
+proposal in memory. A proposal from a replaced session, or an older one from
+the current session, is dropped, and a retraction removes the proposal it
+names. A gateway that restarts stops nothing until the new session proposes,
+so a workload that resumed work during an outage is not stopped on a stale
+record. A proposal starts at most one idle stop per sandbox, through the
+existing stop path with an idle cause.
 
-Before taking any lifecycle lock, the stop task:
+Under the lifecycle lock, each `Stopping` write attempt requires:
 
-1. requires a fresh shared owner record naming the session;
-2. sends a `WorkloadActivityRequest`;
-3. waits up to 5 seconds for the reply.
+- the same session's proposal still held;
+- phase `Ready`, on the proposing main-process instance;
+- the gateway's own effective timeout, reached by the proposal's wait, so a
+  supervisor still on an older, shorter setting does not decide;
+- a fresh shared owner record that names the session.
 
-No reply, as from a dead or replaced stream, cancels the stop. Keeping the round
-trip outside the lock lets the session keep reading messages throughout.
-
-Under the lifecycle lock, each `Stopping` write attempt runs a final check. It
-requires:
-
-- a confirmation at most 2 seconds old;
-- the re-read setting;
-- a still-due live report from the confirming session;
-- a fresh owner record that still names that session.
-
-The confirmation's deadline, 2 seconds after its reply arrived, bounds every wait
-in the final check. It is checked again just before the write is issued, and an
-attempt that passes it is abandoned.
-
-The check holds the sandbox's activity gate through the write, and every live
-report update takes the same gate. A report that takes the gate before the
-final check, such as `Working`, always counts. A report that reaches the handler
-while the stop holds the gate waits behind that write. A conflicting write
-releases the gate and checks again.
-
-Every summary carries an increasing sequence number. The supervisor takes one
-lock from snapshot to enqueue for both pushes and replies. The gateway drops an
-older summary from the same session, so a late reply cannot overwrite a newer
-push.
+After the `Stopping` write and before the driver call, the stop checks the
+proposal again. A retraction or session change received in between rolls the
+sandbox back to its previous state and abandons the stop. If that rollback
+loses a write race, the stop goes ahead like any other in-flight stop. No
+report waits on a store write, so the session keeps reading messages
+throughout.
 
 The stop boundary is therefore:
 
-- **Always counted:** everything the supervisor observed before it answered the
-  confirmation, and every report that takes the activity gate before the final
-  check does.
-- **Can race the stop:** input or a new turn between the supervisor's snapshot
-  and the write. That covers a report waiting for the gate while the stop
-  holds it. The write is issued at most 2 seconds after the reply arrives, so
-  the window is at most one network round trip, plus those 2 seconds, plus the
-  write's own latency.
+- **Always counted:** input or a new turn that the supervisor sees, and whose
+  retraction reaches the gateway, before the check that follows the `Stopping`
+  write.
+- **Can race the stop:** input in the last second before that check, which
+  the reporter has not yet noticed, and anything after it while the driver
+  call runs.
 
-Closing that window would require the supervisor to hold input while the
-gateway commits, which this RFC does not propose. A takeover by another replica
-in the same window is bounded the same way. The new owner publishes ownership
-before it updates the sandbox record, so the final owner check can miss a
-takeover only within that window.
+A takeover by another replica is bounded the same way. The new owner publishes
+ownership before it updates the sandbox record, and the new session's
+proposals start over, so the old session's proposal no longer holds once the
+new session registers.
 
 The idle request writes the internal annotation `internal.openshell.ai/idle-stop`
 with the reason `IdleStopping`. The annotation survives gateway recovery and
@@ -271,11 +234,11 @@ driver snapshots that rewrite conditions. The Ready condition then settles as
 `IdleStopped` instead of `Stopped`, so users and the CLI can tell an idle stop
 from an explicit one. The gateway reapplies that reason when a driver snapshot
 of the stopped runtime rewrites it. Any other lifecycle write removes the
-annotation. An explicit `sandbox stop` rewrites an idle stop as an ordinary
-stop, so `sandbox connect` no longer starts it. This holds whether the idle
-stop has settled or is still waiting on the driver on another replica. The
-gateway logs each idle stop with the sandbox, the program, and how long it
-waited.
+annotation, including a rollback. An explicit `sandbox stop` rewrites an idle
+stop as an ordinary stop, so `sandbox connect` no longer starts it. This holds
+whether the idle stop has settled or is still waiting on the driver on another
+replica. The gateway logs each idle stop with the sandbox, the program, and how
+long it waited.
 
 ```mermaid
 sequenceDiagram
@@ -286,12 +249,10 @@ sequenceDiagram
     A->>S: OSC 7501 support query
     S->>A: Support reply
     A->>S: state=done:app=claude-code
-    S->>G: SupervisorWorkloadActivity(done, state_age)
-    G->>G: record live report
-    Note over G: idle sweep: done for > idle_stop_after_seconds
-    G->>S: WorkloadActivityRequest
-    S->>G: SupervisorWorkloadActivity(done, request_id)
-    G->>G: final check and Stopping write under the activity gate
+    Note over S: done, no input, for idle_stop_after_seconds
+    S->>G: SupervisorWorkloadIdle(idle, proposal_id 1)
+    G->>G: checks, then the Stopping write
+    G->>G: proposal still held
     G->>D: StopSandbox
     G->>G: phase Stopped, reason IdleStopped
 ```
@@ -336,11 +297,11 @@ report content. `msg` and `title` are validated per the spec, then discarded.
    reader and SSH PTY sessions, with unit tests for parsing, chunk splits,
    limits, and record semantics. A prototype harness has run Claude Code
    2.1.327 and Codex 0.170.0 through the scanner on a host PTY.
-2. **Reporting.** Add `SupervisorWorkloadActivity` and the supervisor reporter
-   task, and the gateway handler that keeps the live report.
-3. **Policy.** Register the `idle_stop_after_seconds` setting. Add the idle
-   sweep and the `IdleStopped` reason, and document them on the sandbox
-   lifecycle page.
+2. **Proposals.** Register the `idle_stop_after_seconds` setting, deliver it
+   to the supervisor's idle reporter, and add `SupervisorWorkloadIdle`.
+3. **Policy.** Add the gateway handler, the checks before and after the
+   `Stopping` write, and the `IdleStopped` reason, and document them on the
+   sandbox lifecycle page.
 4. **Wake on connect.** Auto-start `IdleStopped` sandboxes in
    `openshell sandbox connect`.
 5. **Validation.** Add the `idle_stop` conformance test, which runs a
@@ -372,11 +333,13 @@ sets a gateway value or a user opts in per sandbox.
   on storage that survives stop: the Docker writable layer or workspace volume,
   the Kubernetes PVC, the VM overlay. Agents restarted with their plain command
   start a fresh conversation unless the user runs their resume flag.
-- **Residual stop race.** Input or a new turn between the supervisor's
-  confirmation snapshot and the `Stopping` write can still lose the sandbox.
-  The window is at most one round trip, plus 2 seconds, plus the write's
-  latency, and only for a sandbox that already waited past its timeout. Closing it fully would need the
-  supervisor to hold input during the commit.
+- **Residual stop race.** Input in the second before the check that follows
+  the `Stopping` write, or during the driver call, can still lose the
+  sandbox, and only one that already waited past its timeout. Closing it
+  fully would need the supervisor to hold input until compute stops.
+- **Version skew.** Only supervisors that advertise `supports_idle_proposals`
+  are stopped. A gateway paired with an older supervisor leaves its sandboxes
+  running.
 
 ## Alternatives
 
@@ -399,6 +362,18 @@ Claude Code hooks and similar mechanisms can call out when a turn ends, but
 each agent needs its own configuration inside the sandbox image, and the hook
 runs as workload code with network access. The terminal channel needs nothing
 from the image.
+
+### Decide idleness in the gateway
+
+Earlier versions had the supervisor stream every summary, with relative ages,
+and the gateway rebuild the idle clock from them. A 30-second sweep found due
+sandboxes, added a 15-second allowance for input reports still in flight, and
+then asked the supervisor to confirm with a fresh summary. A per-sandbox gate
+held reports back during the `Stopping` write. The confirmation was the only
+reading that authorized a stop, so the gateway's clock only decided when to
+ask. It needed input-only reports, summary sequence numbers, the sweep, and the
+gate, and the gate made the session's receive loop wait on a store write.
+Moving the clock to the supervisor removes all of that.
 
 ### Show program status in this change
 
@@ -427,7 +402,7 @@ holding capacity.
   on behalf of its sessions and treats an agent's declaration as more reliable
   than heuristics. That is the same position the supervisor takes.
 - Kubernetes scale-to-zero (KEDA, Knative) separates the activity signal from
-  the lifecycle action and wakes on demand. The idle sweep and wake on connect
+  the lifecycle action and wakes on demand. Idle proposals and wake on connect
   follow that split.
 - [RFC 0018](../0018-multi-sandbox-ha-supervisors/README.md) leaves room for
   backend-initiated suspend and wake (#4352). This RFC supplies the signal that
@@ -443,7 +418,9 @@ holding capacity.
   idle at a prompt) count as idle? Phase 1 treats it as unreported.
 - Should the wake path also run the agent's resume command, for example via a
   `SandboxSpec` resume command, or is restarting the canonical command enough?
-- Should exec and SSH proxy also wake an `IdleStopped` sandbox, behind a flag?
+- Should waking move into the gateway, so the TUI, the SDK, exec, and SSH proxy
+  wake an `IdleStopped` sandbox too, and clients stop matching condition
+  reasons? Phase 1 wakes only from `openshell sandbox connect`.
 - Should idle stop ship behind an `unstable-idle-stop` compile flag until it is
   accepted, as RFC 0014 asks of unreleased features? No crate defines such a
   flag yet; phase 1 is off unless the setting is set.
@@ -459,9 +436,6 @@ holding capacity.
   `error`, or `idle` record, so a non-reporting command started after an agent
   exits is not judged by the agent's last report? The OSC 7501 spec keeps those
   records across prompts.
-- Should the final check drop the 15-second input report lag? The confirmed
-  snapshot has no lag, but the sweep would still need it to avoid needless
-  confirmation requests, so the first request is delayed either way.
 - How should clients see program status? A later change could store it in its
   own lightweight object, keyed by sandbox ID and written by the session owner
   on state changes only, like `supervisor_service_installation`, and merge it
