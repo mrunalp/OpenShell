@@ -689,6 +689,7 @@ impl ConfigRuntime {
 
         // Apply OCSF JSON toggle from the `ocsf_json_enabled` setting.
         apply_ocsf_json_setting(&ctx.ocsf_enabled, &result.settings);
+        apply_idle_stop_setting(&ctx.idle_timeout, &result.settings);
         report_deprecated_ocsf_schema_version(&ctx.ocsf_schema_version, &result.settings);
 
         // Apply the agent-proposals feature toggle. On a false→true transition
@@ -1296,6 +1297,7 @@ async fn run_policy_poll_loop_with_client<C: PolicyGatewayClient>(
                         runtime.applied_revision = Some(sandbox_config_revision(&result));
                     }
                     apply_ocsf_json_setting(&ctx.ocsf_enabled, &result.settings);
+                    apply_idle_stop_setting(&ctx.idle_timeout, &result.settings);
                     report_deprecated_ocsf_schema_version(
                         &ctx.ocsf_schema_version,
                         &result.settings,
@@ -1341,6 +1343,7 @@ async fn run_policy_poll_loop_with_client<C: PolicyGatewayClient>(
                 }
                 (InitialPollDisposition::TrackOnly, _) => {
                     apply_ocsf_json_setting(&ctx.ocsf_enabled, &result.settings);
+                    apply_idle_stop_setting(&ctx.idle_timeout, &result.settings);
                     report_deprecated_ocsf_schema_version(
                         &ctx.ocsf_schema_version,
                         &result.settings,
@@ -1504,6 +1507,30 @@ fn apply_ocsf_json_setting(
     let prev_ocsf = enabled.swap(new_ocsf, Ordering::Relaxed);
     if new_ocsf != prev_ocsf {
         info!(ocsf_json_enabled = new_ocsf, "OCSF JSONL logging toggled");
+    }
+}
+
+/// Keep the sandbox's idle reporters on the effective idle stop timeout.
+fn apply_idle_stop_setting(
+    timeout: &openshell_supervisor_process::program_status::IdleTimeout,
+    settings: &std::collections::HashMap<String, openshell_core::proto::EffectiveSetting>,
+) {
+    use openshell_core::proto::setting_value;
+    let seconds = settings
+        .get(openshell_core::settings::IDLE_STOP_AFTER_SECONDS_KEY)
+        .and_then(|setting| setting.value.as_ref())
+        .and_then(|value| value.value.as_ref())
+        .and_then(|value| match value {
+            setting_value::Value::IntValue(seconds) => Some(*seconds),
+            _ => None,
+        });
+    let next = openshell_core::settings::idle_stop_timeout(seconds);
+    if timeout.get() != next {
+        info!(
+            idle_stop_after_seconds = next.map_or(0, |next| next.as_secs()),
+            "Idle stop timeout changed"
+        );
+        timeout.set(next);
     }
 }
 
@@ -2809,6 +2836,7 @@ mod tests {
             entrypoint_pid: Arc::new(AtomicU32::new(0)),
             interval_secs: 0,
             ocsf_enabled: Arc::new(AtomicBool::new(false)),
+            idle_timeout: openshell_supervisor_process::program_status::IdleTimeout::new(),
             ocsf_schema_version: Arc::new(std::sync::Mutex::new(String::new())),
             provider_credentials,
             provider_readiness,

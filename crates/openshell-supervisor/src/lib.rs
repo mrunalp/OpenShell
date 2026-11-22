@@ -1647,6 +1647,10 @@ pub async fn run_sandbox_instance(
         .as_ref()
         .map(|instance| instance.routes.clone());
 
+    // The policy poller keeps this on the sandbox's effective
+    // `idle_stop_after_seconds`; idle reporters on every session read it.
+    let idle_timeout = openshell_supervisor_process::program_status::IdleTimeout::new();
+
     // Spawn background policy poll task (gRPC mode only).
     if let (Some(id), Some(sandbox), Some(gateway), Some(engine)) = (
         sandbox_id.as_deref(),
@@ -1682,6 +1686,7 @@ pub async fn run_sandbox_instance(
             entrypoint_pid: poll_pid,
             interval_secs: poll_interval_secs,
             ocsf_enabled: poll_ocsf_enabled,
+            idle_timeout: idle_timeout.clone(),
             ocsf_schema_version: poll_ocsf_schema_version,
             provider_credentials: poll_provider_credentials,
             provider_readiness: provider_readiness.clone(),
@@ -1780,6 +1785,7 @@ pub async fn run_sandbox_instance(
             app_routes
                 .as_ref()
                 .map(app_listener::Routes::installation_source),
+            idle_timeout,
         )
         .instrument(tracing::info_span!(parent: &startup, "supervisor.access.start"))
         .await?;
@@ -4347,6 +4353,8 @@ struct PolicyPollLoopContext {
     entrypoint_pid: Arc<AtomicU32>,
     interval_secs: u64,
     ocsf_enabled: Arc<AtomicBool>,
+    /// The sandbox's effective idle stop timeout, read by its idle reporters.
+    idle_timeout: openshell_supervisor_process::program_status::IdleTimeout,
     /// Last value of the deprecated `ocsf_schema_version` setting.
     ocsf_schema_version: Arc<std::sync::Mutex<String>>,
     provider_credentials: ProviderCredentialState,

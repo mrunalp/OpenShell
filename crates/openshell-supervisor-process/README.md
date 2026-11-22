@@ -21,18 +21,25 @@ query it sends next. Only the bytes of a possible query are held back, and a
 
 A sandbox-wide summary takes the most active state across terminals
 (working, then blocked, error, done, idle) and the latest client input, which
-outlives the terminal that received it. Each gateway session receives the
-summary at start, on every change, and, while the program waits on the user,
-within 15 seconds of new input, including the last keystroke before typing
-stops. Input to a working program is reported with its next state change. It also answers each
-`WorkloadActivityRequest` with the current summary, which the gateway requires
-before an idle stop. Every transition, including one undone within the same
-read, restarts the state timer and advances a revision. Summaries are published
-under the activity lock, so concurrent terminals never republish an older one.
-Pushes and request replies take one ordering lock from snapshot to enqueue and
-carry increasing sequence numbers, so the gateway can drop an older summary that
-arrives late. Ages are relative, so supervisor and gateway clocks need
-not agree.
+outlives the terminal that received it. Every transition, including one undone
+within the same read, restarts the state timer and advances a revision.
+Summaries are published under the activity lock, so concurrent terminals never
+republish an older one.
+
+The supervisor applies the sandbox's effective `idle_stop_after_seconds`,
+which the configuration poller keeps current, to that summary. On each gateway
+session, an idle reporter checks every second and on every summary change.
+Once some program reports, none works, and the later of the state change and
+the latest input is older than the timeout, it sends a `SupervisorWorkloadIdle`
+proposal. It repeats the proposal with a new id every minute while the wait
+continues. Input or a state change that ends the wait sends a retraction with
+the last proposal's id. Each session starts its ids at 1, so a reconnect
+proposes again. The reporter runs on its own task, so a full outbound queue
+never stalls the session's receive loop.
+
+The scanner also treats `ESC c` outside an OSC as a full reset, including
+inside other control strings. A terminal ends those strings at `ESC` and then
+resets too, so this matches what the user sees.
 
 ## Bounded streaming uploads
 

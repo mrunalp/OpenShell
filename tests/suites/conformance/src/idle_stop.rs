@@ -17,9 +17,9 @@ const KEY: &str = "idle_stop_after_seconds";
 /// wait at the prompt. Echo is on, so the supervisor's reply is echoed back.
 const AGENT: &str = r"printf '\033]7501;?\033\\'; sleep 1; printf '\033]7501;state=done:app=e2e-agent\033\\'; exec sleep infinity";
 
-/// Session setup and the first report, the timeout, the 15 second input
-/// report lag, and the 30 second sweep.
-const IDLE_STOP_DEADLINE: Duration = Duration::from_secs(120);
+/// Session setup, the setting reaching the supervisor (one configuration poll
+/// at worst), the timeout, and the stop itself.
+const IDLE_STOP_DEADLINE: Duration = Duration::from_secs(90);
 /// Connect prints its notice, then starts the sandbox and waits for Ready.
 const WAKE_DEADLINE: Duration = Duration::from_secs(60);
 
